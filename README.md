@@ -25,8 +25,11 @@ bash get-secret.sh
 
 **Methode 2 — Container-Logs:**
 ```bash
-docker compose logs sc-loot-raffle | grep "Admin-Panel"
+docker compose logs sc-loot-raffle | grep "ADMIN SECRET"
 ```
+Seit Härtungsrunde 2 (N2) wird das Secret im Log standardmäßig **maskiert**
+(nur die ersten 4 Zeichen + Länge). Das vollständige Secret wird nur mit
+`SHOW_SECRET_ON_START=1` (als ENV im Container) ausgegeben.
 
 **Methode 3 — Direkt im Container:**
 ```bash
@@ -40,7 +43,9 @@ print(con.execute(\"SELECT value FROM config WHERE key='admin_secret'\").fetchon
 ```
 http://localhost:5000/api/admin/secret-hint
 ```
-⚠ Dieser Endpunkt ist nur von localhost erreichbar, nicht von außen.
+⚠ Dieser Endpunkt ist nur von **localhost (127.0.0.1/::1)** oder explizit erlaubten
+Proxies (`TRUSTED_PROXIES`=kommagetrennte IPs, als ENV) erreichbar — nicht von außen.
+Der Endpunkt lässt sich vollständig abschalten, indem man `DISABLE_SECRET_HINT=1` setzt.
 
 ### Stoppen
 
@@ -85,9 +90,17 @@ Nginx Proxy Manager oder Traefik auf `localhost:5000` (bzw. den gewählten Port)
 
 Dies ist eine inoffizielle Star-Citizen-Fan-Website, nicht verbunden mit der Cloud Imperium-Gruppe. SCLM ist ein nicht-kommerzielles Community-Tool und folgt der [CIG Fan Content Policy](https://support.robertsspaceindustries.com/hc/en-us/articles/360006895793-Star-Citizen-Fankit-and-Fandom-FAQ).
 
+Pflichtdisclaimer (englischer Originalwortlaut, identisch mit der About-Seite):
+
+> This is an unofficial Star Citizen fansite, not affiliated with the Cloud Imperium group of companies.
+> All content on this site not authored by its host or users are property of their respective owners.
+> Star Citizen®, Roberts Space Industries® and Cloud Imperium® are registered trademarks of Cloud Imperium Rights LLC.
+
 ## Lizenz
 
 MIT — siehe [LICENSE](LICENSE)
+
+**Hinweis auf Fremd-Assets:** Die Dateien `static/sc-fan-logo.png` (CIG-Fankit) und `static/uex-badge.png` (UEX Corp) sind Eigentum der jeweiligen Rechteinhaber (Cloud Imperium Rights LLC bzw. UEX Corp) und stehen **nicht** unter der MIT-Lizenz. Sie werden ausschließlich im Rahmen der nicht-kommerziellen CIG Fan Content Policy bzw. der UEX-Nutzungsbedingungen verwendet.
 
 ## Deployment aus Registry (empfohlen für Server)
 
