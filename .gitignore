@@ -1,7 +1,9 @@
 data.db*
 *.db-shm
 *.db-wal
+instance/
 __pycache__/
 *.pyc
 .claude/
 .env
+.venv/

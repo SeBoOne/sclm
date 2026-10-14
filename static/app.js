@@ -1,10 +1,12 @@
 const $=id=>document.getElementById(id);
-const esc=s=>String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+const esc=s=>String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+// URL-sicher für CSS url('...') / style-Attribut: Quotes, Klammern, Backslash entfernen
+const urlEsc=s=>String(s||"").replace(/['"()\\{}]/g,"");
 const show=id=>$(id)&&$(id).classList.remove("H");
 const hide=id=>$(id)&&$(id).classList.add("H");
 const tog=(id,v)=>v?show(id):hide(id);
 
-let S=null,myCode="",myPid="",myPName="";
+let S=null,myCode="",myPid="",myPName="",myPcode="";
 let selT="item",selG="A",selSz="1",selMw=3;
 let saSelT="item",saSelG="A",saSelSz="1";
 let acTmr=null,pollTmr=null,revTmr=null;
@@ -99,7 +101,7 @@ async function loadHome(){
     const scu=s.commodity_scu!=null?fmtN(s.commodity_scu,1)+" SCU":t("misc.n_a");
     const rev=s.commodity_revenue?fmtN(s.commodity_revenue)+" aUEC":t("misc.n_a");
     const imgStyle=s.image_url
-      ? `background:linear-gradient(to right,var(--bg2) 50%,rgba(18,26,34,.85) 55%,rgba(18,26,34,.4) 100%),url('${s.image_url}') right/54% no-repeat;`
+      ? `background:linear-gradient(to right,var(--bg2) 50%,rgba(18,26,34,.85) 55%,rgba(18,26,34,.4) 100%),url('${urlEsc(s.image_url)}') right/54% no-repeat;`
       : '';
     return `<div class="ec" style="${imgStyle}">
       <div class="ec-name">${esc(s.name)} ${lk} ${dn}</div>
@@ -261,7 +263,7 @@ function renderRORes(){
 // ── ADMIN VIEW ────────────────────────────────────────────────────────────────
 function applySessionBg(){
   if(S&&S.image_url){
-    document.body.style.backgroundImage=`linear-gradient(180deg,rgba(8,12,16,.93) 0%,rgba(8,12,16,.99) 55%),url('${S.image_url}')`;
+    document.body.style.backgroundImage=`linear-gradient(180deg,rgba(8,12,16,.93) 0%,rgba(8,12,16,.99) 55%),url('${urlEsc(S.image_url)}')`;
     document.body.style.backgroundSize="cover";
     document.body.style.backgroundPosition="center top";
     document.body.style.backgroundAttachment="fixed";
@@ -337,10 +339,12 @@ function renderAP(){
   if(!S.participants.length){el.innerHTML=`<div class="empty">${t("pa.empty")}</div>`;return;}
   el.innerHTML=[...S.participants].sort((a,b)=>a.name.localeCompare(b.name,"de")).map(p=>{
     const wn=(p.wishes||[]).map(id=>{const l=S.loot.find(x=>x.id===id);return l?esc(l.name):null;}).filter(Boolean);
+    const pc=p.pcode?`<button class="btn btn-xs" title="${t("pa.pcode_tip")}" onclick="copyPcode('${p.id}')">🔑</button>`:"";
     return `<div class="ir">
       <div class="av">${esc(initials(p.name))}</div>
       <div class="im f1"><div class="in">${esc(p.name)}</div>
         <div class="is">${wn.length?"🎯 "+wn.join(" · "):t("pa.no_wishes")}</div></div>
+      ${pc}
       ${S.locked?"":
         `<button class="btn btn-xs btn-acc" onclick="openWishEdit('${p.id}')">${t("pa.btn.wishes")}</button>
          <button class="btn btn-xs btn-red" onclick="removeP('${p.id}')">✕</button>`}
@@ -352,6 +356,12 @@ async function addP(){
   const names=$("p-inp").value.split(",").map(n=>n.trim()).filter(Boolean);if(!names.length) return;
   for(const n of names) await api(`/api/session/${S.id}/participants`,"POST",{code:myCode,name:n,added_by:"admin"});
   $("p-inp").value="";acClose("p-ac");await reloadS();renderAP();updOvStats();
+}
+function copyPcode(pid){
+  const p=S.participants.find(x=>x.id===pid);
+  if(!p||!p.pcode) return;
+  navigator.clipboard&&navigator.clipboard.writeText(p.pcode);
+  alert(t("pa.pcode_copied",{name:p.name}));
 }
 async function removeP(pid){
   if(!confirm(t("pt.del_confirm"))) return;
@@ -678,6 +688,7 @@ function setScale(v){
 })();
 
 const SK=()=>`scr_pid_${S&&S.id}`;
+function loadPcode(pid){try{const v=JSON.parse(localStorage.getItem(SK())||"{}");return (v&&v.pid===pid)?(v.pcode||""):"";}catch(e){return "";}}
 
 function showPartView(){
   showPage("pg-part");show("spill");show("btn-leave");
@@ -686,14 +697,14 @@ function showPartView(){
   $("spill-name").textContent=S.name;$("pt-title").textContent=S.name.toUpperCase();
   hide("pt-wish");hide("pt-wait");hide("pt-result");show("pt-sel");renderPtList();
   const saved=localStorage.getItem(SK());
-  if(saved){try{const{pid,name}=JSON.parse(saved);const f=S.participants.find(p=>p.id===pid);if(f){selectParticipant(pid,name);return;}}catch(e){}}
+  if(saved){try{const{pid,name,pcode}=JSON.parse(saved);const f=S.participants.find(p=>p.id===pid);if(f){selectParticipantById(pid,name,pcode);return;}}catch(e){}}
 }
 
 function renderPtList(){
   const el=$("pt-nm-list");
   if(!S.participants.length){el.innerHTML=`<div class="empty">${t("pt.sel.empty")}</div>`;return;}
   el.innerHTML=[...S.participants].sort((a,b)=>a.name.localeCompare(b.name,"de")).map(p=>`
-    <div class="ir" style="cursor:pointer" onclick="selectParticipant('${p.id}','${esc(p.name)}')">
+    <div class="ir" style="cursor:pointer" data-pid="${esc(p.id)}" onclick="selectParticipant(this.dataset.pid)">
       <div class="av">${esc(initials(p.name))}</div>
       <div class="in f1">${esc(p.name)}</div>
       <span style="color:var(--t2);font-size:11px">→</span>
@@ -703,14 +714,20 @@ function renderPtList(){
 async function selfReg(){
   const name=$("pt-nm-inp").value.trim();if(!name) return;
   const r=await api(`/api/session/${S.id}/participants`,"POST",{code:myCode,name,added_by:"self"});
-  if(r.error&&r.id){selectParticipant(r.id,name);return;}
-  if(r.error){const f=S.participants.find(p=>p.name.toLowerCase()===name.toLowerCase());if(f){selectParticipant(f.id,f.name);return;}alert(r.error);return;}
-  await reloadS();selectParticipant(r.id,name);
+  if(r.error&&r.id){selectParticipantById(r.id,name);return;}
+  if(r.error){const f=S.participants.find(p=>p.name.toLowerCase()===name.toLowerCase());if(f){selectParticipantById(f.id,f.name);return;}alert(r.error);return;}
+  await reloadS();selectParticipantById(r.id,name,r.pcode);
 }
 
-function selectParticipant(pid,name){
+function selectParticipantById(pid,name,pcode){
   myPid=pid;myPName=name;
-  localStorage.setItem(SK(),JSON.stringify({pid,name}));
+  if(!pcode){
+    // Legacy/Admin-angelegter Teilnehmer ohne gespeicherten Key: einmalig generieren
+    // und lokal binden — der Server claimed pcode-NULL beim ersten Save (first-come).
+    pcode=loadPcode(pid)||(crypto.randomUUID?crypto.randomUUID().replace(/-/g,""):Math.random().toString(36).slice(2)+Date.now().toString(36));
+  }
+  myPcode=pcode;
+  localStorage.setItem(SK(),JSON.stringify({pid,name,pcode}));
   saveNavState("part",myCode,pid,name);
   hide("pt-sel");$("pt-id-bar").textContent=t("pt.logged_in_as",{name:name});
   if(S.raffle_done) showPtResult();
@@ -722,6 +739,12 @@ function selectParticipant(pid,name){
     if(hasWishes) showPtWaiting();
     else showPtWishes();
   }
+}
+
+function selectParticipant(pid){
+  const p=S.participants.find(x=>x.id===pid);
+  const savedPcode=loadPcode(pid);
+  selectParticipantById(pid, p?p.name:pid, savedPcode);
 }
 
 function showPtWishes(){
@@ -794,7 +817,7 @@ async function saveWishes(){
   const ti=totalItems(S),np=S.participants.length;
   const niMode=ti>0&&np>0&&ti<np;
   const lids=p?(niMode?(p.no_interest||[]):(p.wishes||[])):[];
-  const r=await api(`/api/session/${S.id}/wishes`,"POST",{code:myCode,participant_id:myPid,loot_ids:lids,mode:niMode?"no_interest":"wish"});
+  const r=await api(`/api/session/${S.id}/wishes`,"POST",{code:myCode,pcode:myPcode,participant_id:myPid,loot_ids:lids,mode:niMode?"no_interest":"wish"});
   if(r.error){alert(r.error);return;}
   await reloadS();showPtWaiting();
 }
@@ -825,7 +848,7 @@ async function renderPtResult(){
 }
 
 async function ptSelfMark(rid,field){
-  const r=await api(`/api/session/${S.id}/raffle/${rid}`,"PATCH",{code:myCode,[field]:true});
+  const r=await api(`/api/session/${S.id}/raffle/${rid}`,"PATCH",{code:myCode,pcode:myPcode,[field]:true});
   if(r.error){alert(r.error);return;}
   await reloadS();renderPtResult();
 }
@@ -967,7 +990,6 @@ async function loadSaCo(){
   if(!names.length){el.innerHTML=`<div class="empty">${t("sa.empty.commodities")}</div>`;return;}
   el.innerHTML=names.map(n=>`<div class="ir"><div class="in f1">${esc(n)}</div><button class="btn btn-xs btn-red" onclick="saDelCo('${encodeURIComponent(n)}')">✕</button></div>`).join("");
 }
-async function saAddCo(){const name=$("sa-co-inp").value.trim();if(!name) return;await fetch("/api/admin/commodities",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({secret:superSecret,name})});loadSaCo();}
 async function saDelCo(n){await fetch(`/api/admin/commodities/${n}?secret=${superSecret}`,{method:"DELETE"});loadSaCo();}
 
 async function runUex(){
@@ -1101,7 +1123,7 @@ async function changePw(){
   const res=$("pw-result");
   if(!cur||!nw||!rep){res.innerHTML='<div class="alert a-err">Alle Felder ausfüllen.</div>';return;}
   if(nw!==rep){res.innerHTML='<div class="alert a-err">Kennwörter stimmen nicht überein.</div>';return;}
-  if(nw.length<6){res.innerHTML='<div class="alert a-err">Mindestens 6 Zeichen.</div>';return;}
+  if(nw.length<8){res.innerHTML='<div class="alert a-err">Mindestens 8 Zeichen.</div>';return;}
   const r=await api("/api/admin/change_secret","POST",{secret:cur,new_secret:nw});
   if(r.error){res.innerHTML=`<div class="alert a-err">${esc(r.error)}</div>`;return;}
   superSecret=nw;
