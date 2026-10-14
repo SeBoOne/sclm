@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """SCLM — Web Server. Start: python server.py"""
-import sqlite3, os, json, random, string, re, sys, secrets, time, threading, functools, urllib.request
+import sqlite3, os, json, random, string, re, sys, secrets, time, threading, functools, urllib.request, hmac
 from collections import deque
 from pathlib import Path
 from datetime import datetime
@@ -32,8 +32,9 @@ def print_startup_info():
         print(f"{banner}")
         print(f"  URL:          http://localhost:{port}")
         print(f"{banner}")
-        print(f"  ADMIN SECRET: {sec}")
-        print(f"  Admin-URL:    http://localhost:{port}/#admin?secret={sec}")
+        print(f"  ADMIN SECRET: {_secret_display(sec)}")
+        if os.environ.get("SHOW_SECRET_ON_START","0")=="1":
+            print(f"  Admin-URL:    http://localhost:{port}/#admin?secret={sec}")
         print(f"{banner}\n", flush=True)
     except Exception:
         pass
@@ -113,6 +114,9 @@ def init_db():
                     con.execute(f"ALTER TABLE sessions ADD COLUMN {col} {dflt}")
             except: pass
         try: con.execute("CREATE TABLE IF NOT EXISTS no_interest (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, participant_id TEXT NOT NULL, loot_id TEXT NOT NULL, UNIQUE(participant_id,loot_id))")
+        # N7: Diese no_interest-Migration legt die Tabelle OHNE Foreign Keys an
+        # (bewusst NICHT umgebaut — ALTER auf Bestands-DBs mit FK wäre auf der
+        # Live-DB zu riskant). Neue DBs bekommen die FK-Version aus dem Schema oben.
         except: pass
         try: con.execute("ALTER TABLE sessions ADD COLUMN image_url TEXT")
         except: pass
@@ -134,6 +138,43 @@ def get_admin_secret():
     with get_db() as con:
         return con.execute("SELECT value FROM config WHERE key='admin_secret'").fetchone()["value"]
 
+# ── constant-time comparison (N1) ────────────────────────────────────────────
+def secure_eq(a, b):
+    """Konstantzeit-Vergleich für Secrets/Codes (hmac.compare_digest)."""
+    a = a if a is not None else ""
+    b = b if b is not None else ""
+    try:
+        return hmac.compare_digest(str(a), str(b))
+    except (TypeError, ValueError):
+        return a == b
+
+# ── Credentials aus Header/Query/Body (M4) ──────────────────────────────────
+# Secrets und Codes werden bevorzugt aus den Headers X-SCLM-Secret / X-SCLM-Code
+# gelesen (Frontend schickt nur Header, damit nichts in Access-Logs/History/
+# Referer landet). Query und Body bleiben als Fallback für alte Links/Clients.
+def _secret_candidates():
+    v = request.headers.get("X-SCLM-Secret")
+    if v: return v
+    v = request.args.get("secret")
+    if v: return v
+    d = request.get_json(silent=True) or {}
+    return d.get("secret", "")
+
+def _code_candidates():
+    v = request.headers.get("X-SCLM-Code")
+    if v: return v.upper()
+    v = request.args.get("code")
+    if v: return v.upper()
+    d = request.get_json(silent=True) or {}
+    return (d.get("code") or "").upper()
+
+def _secret_display(sec):
+    """N2: Beim Start nur die ersten 4 Zeichen + Länge zeigen; das vollständige
+    Secret nur mit SHOW_SECRET_ON_START=1."""
+    if os.environ.get("SHOW_SECRET_ON_START", "0") == "1":
+        return sec
+    return f"{sec[:4]}… (Länge {len(sec)})"
+
 init_db()
 print_startup_info()
 
@@ -148,7 +189,11 @@ def code6():
 def loot_key(name,typ,grade,size): return "|".join([name.lower().strip(),typ or "",grade or "",size or ""])
 def row_to_dict(r): return dict(r) if r else None
 def rows_to_list(r): return [dict(x) for x in r]
-def is_admin(s,code): return s and s["admin_code"]==code.upper()
+def is_admin(s,code): return bool(s) and secure_eq(s.get("admin_code"), (code or "").upper())
+
+def _like_escape(q):
+    """N8: LIKE-Wildcards aus Nutzereingabe escapen (Mindert ungewollte Treffer)."""
+    return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 # ── rate limiting (in-memory, je IP) ─────────────────────────────────────────
 _RATE = {}
@@ -285,8 +330,8 @@ def aggregate_stats():
 # ── session ───────────────────────────────────────────────────────────────────
 @app.route("/api/sessions")
 def list_sessions():
-    secret = request.args.get("secret","")
-    is_super = (secret == get_admin_secret())
+    secret = _secret_candidates()
+    is_super = secure_eq(secret, get_admin_secret())
     with get_db() as con:
         rows = rows_to_list(con.execute(
             "SELECT id,name,created,join_code,admin_code,locked,raffle_locked,commodities_locked,raffle_done,total_revenue,image_url FROM sessions ORDER BY created DESC").fetchall())
@@ -347,10 +392,10 @@ def get_session(code):
 
 @app.route("/api/session/<sid>/settings", methods=["PATCH"])
 def update_settings(sid):
-    data=request.json or {}; code=(data.get("code") or "").upper()
+    data=request.json or {}; code=_code_candidates()
     s=load_session(sid)
     if not s: return jsonify({"error":"Nicht gefunden"}),404
-    if not is_admin(s,code) and data.get("secret","")!=get_admin_secret():
+    if not is_admin(s,code) and not secure_eq(_secret_candidates(), get_admin_secret()):
         return jsonify({"error":"Nicht autorisiert"}),403
     with get_db() as con:
         if "max_wishes" in data:
@@ -361,7 +406,7 @@ def update_settings(sid):
         if "locked" in data:
             if data["locked"]:  # anyone authorised can lock
                 con.execute("UPDATE sessions SET locked=1 WHERE id=?",(sid,))
-            elif data.get("secret","") == get_admin_secret():  # only superadmin can unlock
+            elif secure_eq(_secret_candidates(), get_admin_secret()):  # only superadmin can unlock
                 con.execute("UPDATE sessions SET locked=0 WHERE id=?",(sid,))
             else:
                 return jsonify({"error":"Nur ein Administrator kann entsperren"}),403
@@ -389,9 +434,10 @@ def update_settings(sid):
 
 @app.route("/api/session/<sid>/regenerate_codes", methods=["POST"])
 def regenerate_codes(sid):
-    data=request.json; code=(data.get("code") or "").upper()
+    data=request.json; code=_code_candidates()
     s=load_session(sid)
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
+    if s["locked"]: return jsonify({"error":"Session gesperrt"}),403   # N6: gesperrte Session respektieren
     new_jc=code6(); new_ac=code6()
     with get_db() as con:
         con.execute("UPDATE sessions SET join_code=? WHERE id=?",(new_jc,sid))
@@ -400,10 +446,10 @@ def regenerate_codes(sid):
 
 @app.route("/api/session/<sid>", methods=["DELETE"])
 def delete_session(sid):
-    secret=request.args.get("secret",""); code=request.args.get("code","").upper()
+    secret=_secret_candidates(); code=_code_candidates()
     s=load_session(sid)
     if not s: return jsonify({"error":"Nicht gefunden"}),404
-    if not is_admin(s,code) and secret!=get_admin_secret():
+    if not is_admin(s,code) and not secure_eq(secret, get_admin_secret()):
         return jsonify({"error":"Nicht autorisiert"}),403
     with get_db() as con:
         con.execute("DELETE FROM sessions WHERE id=?",(sid,))
@@ -412,14 +458,14 @@ def delete_session(sid):
 # ── participants ──────────────────────────────────────────────────────────────
 @app.route("/api/session/<sid>/participants", methods=["POST"])
 def add_participant(sid):
-    data=request.json or {}; code=(data.get("code") or "").upper()
+    data=request.json or {}; code=_code_candidates()
     name=(data.get("name") or "").strip()
     if not name: return jsonify({"error":"Name erforderlich"}),400
     if len(name) > 120: return jsonify({"error":"Name zu lang"}),400
     s=load_session(sid)
     if not s: return jsonify({"error":"Nicht gefunden"}),404
     admin=is_admin(s,code)
-    if not admin and code!=s["join_code"]: return jsonify({"error":"Nicht autorisiert"}),403
+    if not admin and not secure_eq(code, s["join_code"]): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
     with get_db() as con:
         ex=con.execute("SELECT id FROM participants WHERE session_id=? AND lower(name)=lower(?)",(sid,name)).fetchone()
@@ -434,7 +480,7 @@ def add_participant(sid):
 
 @app.route("/api/session/<sid>/participants/<pid>", methods=["DELETE"])
 def remove_participant(sid,pid):
-    code=request.args.get("code","").upper()
+    code=_code_candidates()
     s=load_session(sid)
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
@@ -446,7 +492,7 @@ def remove_participant(sid,pid):
 
 @app.route("/api/session/<sid>/participants/<pid>", methods=["PATCH"])
 def update_participant(sid,pid):
-    data=request.json; code=(data.get("code") or "").upper()
+    data=request.json; code=_code_candidates()
     s=load_session(sid)
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
@@ -459,7 +505,7 @@ def update_participant(sid,pid):
 # ── loot ──────────────────────────────────────────────────────────────────────
 @app.route("/api/session/<sid>/loot", methods=["POST"])
 def add_loot(sid):
-    data=request.json; code=(data.get("code") or "").upper()
+    data=request.json; code=_code_candidates()
     s=load_session(sid)
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
@@ -485,7 +531,7 @@ def add_loot(sid):
 
 @app.route("/api/session/<sid>/loot/<lid>", methods=["DELETE"])
 def remove_loot(sid,lid):
-    code=request.args.get("code","").upper()
+    code=_code_candidates()
     s=load_session(sid)
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
@@ -497,7 +543,7 @@ def remove_loot(sid,lid):
 
 @app.route("/api/session/<sid>/loot/<lid>/qty", methods=["PATCH"])
 def update_loot_qty(sid,lid):
-    data=request.json; code=(data.get("code") or "").upper()
+    data=request.json; code=_code_candidates()
     s=load_session(sid)
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
@@ -509,7 +555,7 @@ def update_loot_qty(sid,lid):
 
 @app.route("/api/session/<sid>/loot/<lid>/sale", methods=["PATCH"])
 def update_loot_sale(sid,lid):
-    data=request.json; code=(data.get("code") or "").upper()
+    data=request.json; code=_code_candidates()
     s=load_session(sid)
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
@@ -534,7 +580,7 @@ def update_loot_sale(sid,lid):
 # ── wishes & no-interest ──────────────────────────────────────────────────────
 @app.route("/api/session/<sid>/wishes", methods=["POST"])
 def set_wishes(sid):
-    data=request.json or {}; code=(data.get("code") or "").upper()
+    data=request.json or {}; code=_code_candidates()
     pid=data.get("participant_id"); lids=data.get("loot_ids",[])
     mode=data.get("mode","wish")   # 'wish' or 'no_interest'
     if not isinstance(lids, list): return jsonify({"error":"loot_ids muss eine Liste sein"}),400
@@ -542,7 +588,7 @@ def set_wishes(sid):
     s=load_session(sid)
     if not s: return jsonify({"error":"Nicht gefunden"}),404
     admin=is_admin(s,code)
-    if not admin and code!=s["join_code"]: return jsonify({"error":"Nicht autorisiert"}),403
+    if not admin and not secure_eq(code, s["join_code"]): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
     # H5: join_code-Nutzer dürfen nur IHREN eigenen Teilnehmerdatensatz ändern.
     if not admin:
@@ -561,7 +607,7 @@ def set_wishes(sid):
             # join_code, der sich für den Datensatz erklärt, bindet ihn (Claim).
             with get_db() as con:
                 con.execute("UPDATE participants SET pcode=? WHERE id=? AND pcode IS NULL",(pcode,pid))
-        elif owner["pcode"]!=pcode:
+        elif not secure_eq(owner["pcode"], pcode):
             return jsonify({"error":"Nicht autorisiert für diesen Teilnehmer"}),403
     with get_db() as con:
         # pids gegen Session prüfen (Teilnehmer muss existieren)
@@ -589,7 +635,7 @@ def set_wishes(sid):
 # ── commodities ───────────────────────────────────────────────────────────────
 @app.route("/api/session/<sid>/commodities", methods=["POST"])
 def add_commodity(sid):
-    data=request.json; code=(data.get("code") or "").upper()
+    data=request.json; code=_code_candidates()
     s=load_session(sid)
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
@@ -611,7 +657,7 @@ def add_commodity(sid):
 
 @app.route("/api/session/<sid>/commodities/<cid>", methods=["PATCH"])
 def update_commodity(sid,cid):
-    data=request.json; code=(data.get("code") or "").upper()
+    data=request.json; code=_code_candidates()
     s=load_session(sid)
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
@@ -626,7 +672,7 @@ def update_commodity(sid,cid):
 
 @app.route("/api/session/<sid>/commodities/<cid>/qty", methods=["PATCH"])
 def update_commodity_qty(sid,cid):
-    data=request.json; code=(data.get("code") or "").upper()
+    data=request.json; code=_code_candidates()
     s=load_session(sid)
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
@@ -638,7 +684,7 @@ def update_commodity_qty(sid,cid):
 
 @app.route("/api/session/<sid>/commodities/<cid>", methods=["DELETE"])
 def delete_commodity(sid,cid):
-    code=request.args.get("code","").upper()
+    code=_code_candidates()
     s=load_session(sid)
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
@@ -650,7 +696,7 @@ def delete_commodity(sid,cid):
 @app.route("/api/session/<sid>/raffle", methods=["POST"])
 @rate_limit("raffle", 20, 60)
 def run_raffle(sid):
-    data=request.json; code=(data.get("code") or "").upper()
+    data=request.json; code=_code_candidates()
     s=load_session(sid)
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     participants=s["participants"]
@@ -739,12 +785,12 @@ def run_raffle(sid):
 
 @app.route("/api/session/<sid>/raffle/<rid>", methods=["PATCH"])
 def update_result(sid,rid):
-    data=request.json or {}; code=(data.get("code") or "").upper()
+    data=request.json or {}; code=_code_candidates()
     s=load_session(sid)
     if not s: return jsonify({"error":"Nicht gefunden"}),404
     admin=is_admin(s,code)
-    is_super=data.get("secret","")== get_admin_secret()
-    join_code=(code==s["join_code"])
+    is_super=secure_eq(_secret_candidates(), get_admin_secret())
+    join_code=secure_eq(code, s["join_code"])
     if not admin and not is_super and not join_code:
         return jsonify({"error":"Nicht autorisiert"}),403
     with get_db() as con:
@@ -761,7 +807,7 @@ def update_result(sid,rid):
         if owner["pcode"] is None:
             with get_db() as con:
                 con.execute("UPDATE participants SET pcode=? WHERE id=? AND pcode IS NULL",(pcode,r["participant_id"]))
-        elif owner["pcode"]!=pcode:
+        elif not secure_eq(owner["pcode"], pcode):
             return jsonify({"error":"Nicht autorisiert für diesen Gewinn"}),403
         with get_db() as con:
             # Participants: one-way only (can set but not unset)
@@ -779,10 +825,10 @@ def update_result(sid,rid):
 
 @app.route("/api/session/<sid>/raffle/result_for/<pid>")
 def result_for_participant(sid,pid):
-    code=request.args.get("code","").upper()
+    code=_code_candidates()
     s=load_session(sid)
     if not s: return jsonify({"error":"Nicht gefunden"}),404
-    if code!=s["join_code"] and not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
+    if not secure_eq(code, s["join_code"]) and not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     with get_db() as con:
         r=row_to_dict(con.execute("SELECT * FROM raffle_results WHERE session_id=? AND participant_id=?",(sid,pid)).fetchone())
     if not r: return jsonify({"result":None})
@@ -791,29 +837,29 @@ def result_for_participant(sid,pid):
 # ── search endpoints ──────────────────────────────────────────────────────────
 @app.route("/api/items/search")
 def search_items():
-    q=(request.args.get("q") or "").lower().strip()
+    q=_like_escape((request.args.get("q") or "").lower().strip())
     with get_db() as con:
-        rows=rows_to_list(con.execute("SELECT * FROM item_db WHERE lower(name) LIKE ? LIMIT 12",(f"%{q}%",)).fetchall())
+        rows=rows_to_list(con.execute("SELECT * FROM item_db WHERE lower(name) LIKE ? ESCAPE '\\' LIMIT 12",(f"%{q}%",)).fetchall())
     return jsonify(rows)
 
 @app.route("/api/commodities/search")
 def search_commodities():
-    q=(request.args.get("q") or "").lower().strip()
+    q=_like_escape((request.args.get("q") or "").lower().strip())
     with get_db() as con:
-        rows=[r["name"] for r in con.execute("SELECT name FROM commodity_db WHERE lower(name) LIKE ? LIMIT 10",(f"%{q}%",)).fetchall()]
+        rows=[r["name"] for r in con.execute("SELECT name FROM commodity_db WHERE lower(name) LIKE ? ESCAPE '\\' LIMIT 10",(f"%{q}%",)).fetchall()]
     return jsonify(rows)
 
 @app.route("/api/participants/search")
 def search_participants():
-    q=(request.args.get("q") or "").lower().strip()
+    q=_like_escape((request.args.get("q") or "").lower().strip())
     with get_db() as con:
-        rows=[r["name"] for r in con.execute("SELECT name FROM participant_db WHERE lower(name) LIKE ? LIMIT 12",(f"%{q}%",)).fetchall()]
+        rows=[r["name"] for r in con.execute("SELECT name FROM participant_db WHERE lower(name) LIKE ? ESCAPE '\\' LIMIT 12",(f"%{q}%",)).fetchall()]
     return jsonify(rows)
 
 # ── admin endpoints ───────────────────────────────────────────────────────────
 @app.route("/api/admin/data")
 def admin_data():
-    if request.args.get("secret","")!=get_admin_secret(): return jsonify({"error":"Nicht autorisiert"}),403
+    if not secure_eq(_secret_candidates(), get_admin_secret()): return jsonify({"error":"Nicht autorisiert"}),403
     with get_db() as con:
         items=rows_to_list(con.execute("SELECT * FROM item_db ORDER BY name COLLATE NOCASE").fetchall())
         names=[r["name"] for r in con.execute("SELECT name FROM participant_db ORDER BY name COLLATE NOCASE").fetchall()]
@@ -822,14 +868,14 @@ def admin_data():
 
 @app.route("/api/admin/items/<path:key>", methods=["DELETE"])
 def admin_delete_item(key):
-    if request.args.get("secret","")!=get_admin_secret(): return jsonify({"error":"Nicht autorisiert"}),403
+    if not secure_eq(_secret_candidates(), get_admin_secret()): return jsonify({"error":"Nicht autorisiert"}),403
     with get_db() as con: con.execute("DELETE FROM item_db WHERE loot_key=?",(key,))
     return jsonify({"ok":True})
 
 @app.route("/api/admin/items", methods=["POST"])
 def admin_add_item():
     d=request.json
-    if d.get("secret","")!=get_admin_secret(): return jsonify({"error":"Nicht autorisiert"}),403
+    if not secure_eq(_secret_candidates(), get_admin_secret()): return jsonify({"error":"Nicht autorisiert"}),403
     name=(d.get("name") or "").strip()
     if not name: return jsonify({"error":"Name erforderlich"}),400
     typ=d.get("type") or None; grade=d.get("grade") or None; size=d.get("size") or None
@@ -840,14 +886,14 @@ def admin_add_item():
 
 @app.route("/api/admin/participants/<path:name>", methods=["DELETE"])
 def admin_delete_participant(name):
-    if request.args.get("secret","")!=get_admin_secret(): return jsonify({"error":"Nicht autorisiert"}),403
+    if not secure_eq(_secret_candidates(), get_admin_secret()): return jsonify({"error":"Nicht autorisiert"}),403
     with get_db() as con: con.execute("DELETE FROM participant_db WHERE name=?",(name,))
     return jsonify({"ok":True})
 
 @app.route("/api/admin/participants", methods=["POST"])
 def admin_add_participant_db():
     d=request.json
-    if d.get("secret","")!=get_admin_secret(): return jsonify({"error":"Nicht autorisiert"}),403
+    if not secure_eq(_secret_candidates(), get_admin_secret()): return jsonify({"error":"Nicht autorisiert"}),403
     name=(d.get("name") or "").strip()
     if not name: return jsonify({"error":"Name erforderlich"}),400
     with get_db() as con: con.execute("INSERT OR IGNORE INTO participant_db(name) VALUES(?)",(name,))
@@ -855,7 +901,7 @@ def admin_add_participant_db():
 
 @app.route("/api/admin/commodities/<path:name>", methods=["DELETE"])
 def admin_delete_commodity_db(name):
-    if request.args.get("secret","")!=get_admin_secret(): return jsonify({"error":"Nicht autorisiert"}),403
+    if not secure_eq(_secret_candidates(), get_admin_secret()): return jsonify({"error":"Nicht autorisiert"}),403
     with get_db() as con: con.execute("DELETE FROM commodity_db WHERE name=?",(name,))
     return jsonify({"ok":True})
 
@@ -863,7 +909,7 @@ def admin_delete_commodity_db(name):
 @app.route("/api/admin/uex_import", methods=["POST"])
 def uex_import():
     d=request.json
-    if d.get("secret","")!=get_admin_secret(): return jsonify({"error":"Nicht autorisiert"}),403
+    if not secure_eq(_secret_candidates(), get_admin_secret()): return jsonify({"error":"Nicht autorisiert"}),403
     items=d.get("items",[])
     if not items: return jsonify({"error":"Keine Daten empfangen"}),400
     # Browser already sends pre-mapped values: type="CIV"/"MIL" etc., grade="A"/"B" etc.
@@ -938,7 +984,7 @@ def parse_raidhelper():
 @rate_limit("change_secret", 10, 60)
 def change_secret():
     d=request.json or {}
-    if d.get("secret","")!=get_admin_secret(): return jsonify({"error":"Aktuelles Kennwort falsch"}),403
+    if not secure_eq(_secret_candidates(), get_admin_secret()): return jsonify({"error":"Aktuelles Kennwort falsch"}),403
     new_secret=(d.get("new_secret") or "").strip()
     if len(new_secret)<8: return jsonify({"error":"Kennwort muss mindestens 8 Zeichen haben"}),400
     with get_db() as con:
@@ -952,23 +998,28 @@ def change_secret():
 @app.route("/api/admin/verify", methods=["POST"])
 @rate_limit("verify", 30, 60)
 def verify_admin():
-    d = request.json or {}
-    if d.get("secret","") == get_admin_secret():
+    d = request.get_json(silent=True) or {}
+    if secure_eq(_secret_candidates(), get_admin_secret()):
         return jsonify({"ok": True})
     return jsonify({"error": "Ungültiges Kennwort"}), 403
 
 @app.route("/api/admin/secret-hint")
 def secret_hint():
-    """Returns the admin secret — only accessible from localhost/container-internal."""
+    """Returns the admin secret — only accessible from localhost (127.0.0.1/::1)
+    oder explizit erlaubten Proxies (TRUSTED_PROXIES). Lässt sich per ENV
+    DISABLE_SECRET_HINT=1 vollständig abschalten (M6)."""
+    if os.environ.get("DISABLE_SECRET_HINT", "0") == "1":
+        return jsonify({"error": "Deaktiviert"}), 404
     remote = request.remote_addr or ""
-    allowed = ("127.0.0.1", "::1", "localhost")
-    if not (remote in allowed or remote.startswith("::ffff:127.") or remote == "172.17.0.1"):
+    trusted = {x.strip() for x in os.environ.get("TRUSTED_PROXIES", "").split(",") if x.strip()}
+    localhost = remote in ("127.0.0.1", "::1", "localhost") or remote.startswith("::ffff:127.")
+    if not (localhost or remote in trusted):
         return jsonify({"error": "Nur lokal erreichbar"}), 403
     sec = get_admin_secret()
     return jsonify({
         "secret": sec,
         "admin_url": f"/#admin?secret={sec}",
-        "hint": "Dieser Endpunkt ist nur von localhost erreichbar."
+        "hint": "Dieser Endpunkt ist nur von localhost oder TRUSTED_PROXIES erreichbar."
     })
 
 @app.route("/setup", methods=["GET", "POST"])
@@ -999,7 +1050,7 @@ Das Admin-Secret ist in den <strong>Container-Logs</strong> einsehbar.<br><br>
     if request.method == "POST":
         d = request.get_json(silent=True) or request.form
         provided = (d.get("secret") or "").strip()
-        if provided and provided == get_admin_secret():
+        if provided and secure_eq(provided, get_admin_secret()):
             with get_db() as con:
                 con.execute("UPDATE config SET value='1' WHERE key='setup_viewed'")
             return f"""<!DOCTYPE html>
@@ -1076,7 +1127,8 @@ if __name__=="__main__":
     print(f"  URL:          http://localhost:{port}")
     print(f"  Netzwerk:     http://<deine-IP>:{port}")
     print(f"{banner}")
-    print(f"  ADMIN SECRET: {sec}")
-    print(f"  Admin-URL:    http://localhost:{port}/#admin?secret={sec}")
+    print(f"  ADMIN SECRET: {_secret_display(sec)}")
+    if os.environ.get("SHOW_SECRET_ON_START","0")=="1":
+        print(f"  Admin-URL:    http://localhost:{port}/#admin?secret={sec}")
     print(f"{banner}\n")
     app.run(host="0.0.0.0",port=port,debug=False)
