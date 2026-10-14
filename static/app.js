@@ -1228,9 +1228,15 @@ function setPalette(name) {
   if (sel) sel.value = name;
 }
 function initPalette() {
+  // URL-Param ?p=... gewinnt (Demo/Deeplink), sonst localStorage, sonst ion.
+  let fromUrl = null;
+  try {
+    const q = new URLSearchParams(location.search).get('p');
+    if (q && PALS.indexOf(q) >= 0) fromUrl = q;
+  } catch (_) {}
   let saved = null;
   try { saved = localStorage.getItem('sclm_palette'); } catch (_) {}
-  setPalette(saved || 'ion');
+  setPalette(fromUrl || saved || 'ion');
   const sel = document.getElementById('palette-select');
   if (sel) {
     const label = (typeof t === 'function') ? t('ui.palette') : 'Farbschema';
