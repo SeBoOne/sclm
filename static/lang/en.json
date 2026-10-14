@@ -199,8 +199,6 @@
   "sa.sub": "SYSTEM // FULL ACCESS",
   "pt.logged_in_as": "Logged in as: {name}",
   "pt.wait.identity": "Logged in as: {name}",
-  "pa": {
-    "pcode_tip": "Copy participant key (share it with the participant)",
-    "pcode_copied": "Participant key of {name} copied — share it with the participant (it is needed when they select their name)."
-  }
+  "pa.pcode_tip": "Copy participant key (share it with the participant)",
+  "pa.pcode_copied": "Participant key of {name} copied — share it with the participant (it is needed when they select their name)."
 }
