@@ -1,0 +1,4 @@
+# Redirect all requests to Passenger WSGI
+PassengerEnabled on
+PassengerAppType wsgi
+PassengerStartupFile passenger_wsgi.py

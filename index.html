@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>SCLM — Star Citizen Loot Manager</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg"/>
+<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png"/>
+<link rel="icon" type="image/png" sizes="16x16" href="/static/favicon-16.png"/>
+<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png"/>
+<link rel="manifest" href="/static/site.webmanifest"/>
+<meta name="theme-color" content="#080c10"/>
+<meta name="application-name" content="SCLM"/>
+<meta name="description" content="Star Citizen Loot Manager — fair loot distribution for crews"/>
+<link rel="stylesheet" href="/static/app.css"/>
+</head>
+<body>
+<div class="topbar">
+  <div style="display:flex;align-items:center;gap:10px">
+    <svg width="30" height="30" viewBox="0 0 60 60" style="flex-shrink:0">
+      <polygon points="30,4 52,16 52,44 30,56 8,44 8,16" fill="none" stroke="#1e8bc3" stroke-width="1.5"/>
+      <polygon points="30,10 47,20 47,40 30,50 13,40 13,20" fill="#0d2a3d" stroke="#1e8bc3" stroke-width="0.5"/>
+      <polygon points="30,16 41,30 30,44 19,30" fill="none" stroke="#c89b3c" stroke-width="1.2"/>
+      <polygon points="30,21 36,30 30,39 24,30" fill="#c89b3c" opacity="0.3"/>
+      <circle cx="30" cy="30" r="2.5" fill="#c89b3c"/>
+      <line x1="30" y1="16" x2="30" y2="44" stroke="#c89b3c" stroke-width="0.5" opacity="0.4"/>
+      <line x1="19" y1="30" x2="41" y2="30" stroke="#c89b3c" stroke-width="0.5" opacity="0.4"/>
+    </svg>
+    <div><div class="logo">SCLM</div><div class="logo-sub">STAR CITIZEN LOOT MANAGER</div></div>
+  </div>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:4px">
+    <button id="lang-de" class="btn btn-sm btn-acc" onclick="setLang('de')" style="padding:3px 9px;font-size:11px;font-weight:700">DE</button>
+    <button id="lang-en" class="btn btn-sm" onclick="setLang('en')" style="padding:3px 9px;font-size:11px">EN</button>
+    <button class="btn btn-sm" onclick="showAbout()" style="color:var(--t2);background:transparent;border-color:transparent;margin-left:2px">ℹ About</button>
+  </div>
+  <div class="tbr">
+    <div class="spill H" id="spill">SESSION: <span id="spill-name">—</span></div>
+    <button class="btn btn-sm H" id="btn-leave" onclick="leaveSess()" data-i18n="btn.leave">✕ Verlassen</button>
+    <div style="display:flex;align-items:center;gap:5px;margin-left:8px;border-left:1px solid var(--bdr);padding-left:12px">
+      <span style="font-size:10px;color:var(--t2);font-family:monospace;user-select:none">A</span>
+      <input type="range" id="scale-slider" min="0.8" max="1.4" step="0.05" value="1"
+        style="width:80px;accent-color:var(--acc);cursor:pointer"
+        oninput="setScale(this.value)"/>
+      <span style="font-size:13px;color:var(--t2);font-family:monospace;user-select:none">A</span>
+    </div>
+  </div>
+</div>
+
+<!-- HOME -->
+<div class="page" id="pg-home">
+  <div class="ph">
+    <div><h1 data-i18n="home.title">EVENTS</h1><p data-i18n="home.sub">SCLM // STAR CITIZEN LOOT MANAGER</p></div>
+    <div class="ph-r">
+      <button class="btn btn-acc" onclick="togCreatePanel()" data-i18n="home.btn.new">+ Neues Event</button>
+      <button class="btn" onclick="goAdmin()" data-i18n="home.btn.admin">⚙ Administration</button>
+    </div>
+  </div>
+  <div id="create-panel" class="card H">
+    <div class="ct" data-i18n="home.create.title">◈ Neues Event</div>
+    <div class="g2">
+      <div>
+        <div class="mb8"><label data-i18n="home.create.name.label">Event-Name</label><input id="new-name" data-i18n-ph="home.create.name.placeholder" placeholder="z.B. Jumptown Raid #4"/></div>
+        <div class="mb8"><label data-i18n="home.create.maxw.label">Max. Wünsche pro Teilnehmer</label>
+          <div class="tg" id="mw-grp">
+            <button class="tgl" data-v="1" onclick="sMw(this)">1</button>
+            <button class="tgl" data-v="2" onclick="sMw(this)">2</button>
+            <button class="tgl st" data-v="3" onclick="sMw(this)">3</button>
+            <button class="tgl" data-v="4" onclick="sMw(this)">4</button>
+            <button class="tgl" data-v="5" onclick="sMw(this)">5</button>
+            <button class="tgl" data-v="6" onclick="sMw(this)">6</button>
+          </div>
+        </div>
+        <button class="btn btn-acc btn-full" onclick="createSession()" data-i18n="home.create.btn">✓ Event erstellen</button>
+        <div id="create-err" class="alert a-err H mt8"></div>
+      </div>
+      <div>
+        <label data-i18n="home.rh.label">Oder Raidhelper JSON importieren</label>
+        <div style="border:2px dashed var(--bdr2);border-radius:var(--r2);padding:22px;text-align:center;cursor:pointer" onclick="document.getElementById('rh-file').click()">
+          <div style="font-size:28px;margin-bottom:6px">⬆</div>
+          <div style="font-size:12px;color:var(--t2)" data-i18n="home.rh.file">JSON-Datei auswählen</div>
+        </div>
+        <input type="file" id="rh-file" accept=".json" class="H" onchange="importRH(this)"/>
+      </div>
+    </div>
+  </div>
+  <div class="card" id="home-login">
+    <div class="ct" data-i18n="home.login.title">◈ Mit Code einloggen</div>
+    <div class="row c">
+      <input id="code-inp" class="f1" data-i18n-ph="home.login.placeholder" placeholder="6-stelligen Code..." style="text-transform:uppercase;letter-spacing:3px" maxlength="6" oninput="this.value=this.value.toUpperCase()" onkeydown="if(event.key==='Enter')loginCode()"/>
+      <button class="btn btn-acc" onclick="loginCode()" data-i18n="home.login.btn">→ Einloggen</button>
+    </div>
+    <div id="code-err" class="alert a-err H mt8"></div>
+  </div>
+  <div id="home-stats" class="g2" style="grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px"></div>
+  <div class="list" id="event-list"></div>
+</div>
+
+<!-- ABOUT -->
+<div class="page H" id="pg-about">
+  <div class="ph"><div><h1>ABOUT SCLM</h1><p>STAR CITIZEN LOOT MANAGER // LEGAL &amp; CREDITS</p></div>
+    <div class="ph-r"><button class="btn btn-sm" onclick="goHome()" data-i18n="btn.back">← Zurück</button></div>
+  </div>
+
+  <!-- SC Fan Logo centered -->
+  <div style="text-align:center;margin-bottom:20px">
+    <img src="/static/sc-fan-logo.png"
+      alt="Star Citizen Fan Site" style="max-width:220px;opacity:0.9"
+      onerror="this.style.display='none'"/>
+  </div>
+
+  <!-- Required CIG disclaimer — must be prominent -->
+  <div style="background:rgba(30,139,195,.1);border:1px solid rgba(30,139,195,.4);border-radius:var(--r2);padding:16px 20px;margin-bottom:14px;text-align:center">
+    <p style="font-size:13px;line-height:1.9;color:var(--t1)">
+      <strong style="color:var(--t0);font-size:14px">This is an unofficial Star Citizen fansite, not affiliated with the Cloud Imperium group of companies.</strong><br>
+      All content on this site not authored by its host or users are property of their respective owners.<br>
+      <strong style="color:var(--t0)">Star Citizen®, Roberts Space Industries®</strong> and <strong style="color:var(--t0)">Cloud Imperium®</strong> are registered trademarks of Cloud Imperium Rights LLC.<br><br>
+      <a href="https://robertsspaceindustries.com" target="_blank" style="color:var(--acc)">→ Visit the official Star Citizen website</a>
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="ct">◈ About SCLM</div>
+    <p style="font-size:13px;line-height:1.9;color:var(--t1)">
+      <strong style="color:var(--t0)">SCLM — Star Citizen Loot Manager</strong> is a free, non-commercial fan-made tool
+      created by and for the Star Citizen community to fairly distribute loot and cargo among crew members.<br><br>
+      This project was created with the assistance of <strong style="color:var(--t0)">AI (Claude by Anthropic)</strong>
+      and is shared freely with the community. It is not affiliated with or endorsed by Cloud Imperium Games.<br><br>
+      Use of the Star Citizen Fankit assets on this site is in accordance with the
+      <a href="https://support.robertsspaceindustries.com/hc/en-us/articles/360006895793" target="_blank" style="color:var(--acc)">CIG Fankit &amp; Fandom FAQ</a>.
+      This site is non-commercial and no fees are charged for its use.
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="ct">◈ Data Sources &amp; Credits</div>
+    <div style="display:flex;align-items:flex-start;gap:20px;flex-wrap:wrap">
+      <div style="flex:1;min-width:200px">
+        <p style="font-size:13px;line-height:1.9;color:var(--t1)">
+          Ship component data is provided by <strong style="color:var(--t0)">UEX Corp</strong>
+          via their public API at <a href="https://uexcorp.space" target="_blank" style="color:var(--acc)">uexcorp.space</a>.
+          SCLM is not affiliated with UEX Corp. All UEX data is subject to their own terms of service.<br><br>
+          Event imports use data exported from <strong style="color:var(--t0)">Raid-Helper</strong>
+          (<a href="https://raid-helper.dev" target="_blank" style="color:var(--acc)">raid-helper.dev</a>).
+          SCLM is not affiliated with Raid-Helper.
+        </p>
+      </div>
+      <div style="flex-shrink:0;text-align:center">
+        <a href="https://uexcorp.space" target="_blank">
+          <img src="/static/uex-badge.png"
+            alt="Powered by UEX" style="max-width:160px;border-radius:4px"
+            onerror="this.style.display='none'"/>
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="ct">◈ Data &amp; Privacy</div>
+    <p style="font-size:13px;line-height:1.9;color:var(--t1)">
+      SCLM does not transmit or sell any user data to third parties.<br>
+      All event and participant data is stored in the database of the server hosting this instance of SCLM.
+      If you are using a publicly hosted instance, your data is stored on that server operator's infrastructure.
+      For full control over your data, you can self-host SCLM using the provided Docker image.<br><br>
+      External network requests made by this application are limited to:
+      the UEX Corp API (triggered manually by an admin for component data import) and
+      Raid-Helper CDN (for loading event banner images only).
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="ct">◈ New to Star Citizen?</div>
+    <p style="font-size:13px;line-height:1.9;color:var(--t1)">
+      If you haven't tried Star Citizen yet and want to give it a go, consider using a referral code
+      when creating your account — it gets you extra in-game currency to start your journey:<br><br>
+      <span style="font-family:monospace;font-size:18px;color:var(--gold);letter-spacing:3px;font-weight:700">STAR-GPV6-ZHR2</span><br><br>
+      <a href="https://www.robertsspaceindustries.com/enlist?referral=STAR-GPV6-ZHR2" target="_blank"
+        style="display:inline-block;padding:10px 20px;background:var(--gdim);border:1px solid var(--gold);color:var(--gold);border-radius:var(--r);font-size:13px;font-weight:600;text-decoration:none;margin-top:4px">
+        → Star Citizen mit Referral-Code starten
+      </a>
+    </p>
+  </div>
+</div>
+<!-- READ-ONLY VIEW -->
+<div class="page H" id="pg-ro">
+  <div class="ph">
+    <div>
+      <h1 id="ro-title">EVENT</h1>
+      <p id="ro-sub">READ ONLY // ÜBERSICHT</p>
+    </div>
+    <div class="ph-r">
+      <span class="ro-badge">👁 Leseansicht</span>
+      <button class="btn btn-sm" onclick="goHome()" data-i18n="btn.back">← Zurück</button>
+    </div>
+  </div>
+  <div class="stats" id="ro-stats"></div>
+  <div class="tabs">
+    <button class="tab active" onclick="roTab('loot')" id="rot-loot" data-i18n="ro.tab.loot">Loot</button>
+    <button class="tab" onclick="roTab('comm')" id="rot-comm" data-i18n="ro.tab.comm">Waren</button>
+    <button class="tab" onclick="roTab('res')"  id="rot-res" data-i18n="ro.tab.res">Ergebnisse</button>
+  </div>
+  <div id="rot-loot-c"><div class="list" id="ro-loot-list"></div></div>
+  <div id="rot-comm-c" class="H">
+    <div class="list" id="ro-comm-list"></div>
+    <div class="card mt8" id="ro-co-sum"></div>
+  </div>
+  <div id="rot-res-c" class="H"><div id="ro-res"></div></div>
+</div>
+
+<!-- ADMIN VIEW -->
+<div class="page H" id="pg-admin">
+  <div class="ph">
+    <div><h1 id="adm-title">EVENT</h1><p id="adm-sub" data-i18n="adm.sub">ADMIN // VOLLZUGRIFF</p></div>
+    <div class="ph-r">
+      <button class="btn btn-sm" id="lock-btn" onclick="toggleLock()">🔓 Entsperrt</button>
+      <button class="btn btn-sm H" id="raffle-lock-btn" onclick="toggleRaffleLock()">🎲 Verlosung offen</button>
+      <button class="btn btn-sm H" id="comm-lock-btn" onclick="toggleCommLock()">🏷 Waren offen</button>
+      <button class="btn btn-sm" onclick="exportTxt()" data-i18n="adm.btn.export">⬇ Export</button>
+    </div>
+  </div>
+  <div class="tabs">
+    <button class="tab active" onclick="aTab('ov')" id="at-ov" data-i18n="adm.tab.ov">Übersicht</button>
+    <button class="tab" onclick="aTab('pa')" id="at-pa" data-i18n="adm.tab.pa">Teilnehmer</button>
+    <button class="tab" onclick="aTab('lo')" id="at-lo" data-i18n="adm.tab.lo">Loot</button>
+    <button class="tab" onclick="aTab('co')" id="at-co" data-i18n="adm.tab.co">Waren</button>
+    <button class="tab" onclick="aTab('ra')" id="at-ra" data-i18n="adm.tab.ra">Verlosung</button>
+  </div>
+  <!-- overview -->
+  <div id="at-ov-c">
+    <div class="g2">
+      <div class="cbox"><div class="cv" id="dj">——</div><div class="cl" data-i18n="ov.join.label">Teilnehmer-Code — teilen</div>
+        <button class="btn btn-sm btn-acc mt8" onclick="cpCode('join')" data-i18n="ov.btn.copy">📋 Kopieren</button></div>
+      <div class="cbox gold"><div class="cv" id="da">——</div><div class="cl" data-i18n="ov.admin.label">Admin-Code — nur für dich</div>
+        <div style="display:flex;gap:6px;justify-content:center;flex-wrap:wrap">
+          <button class="btn btn-sm mt8" onclick="cpCode('admin')" style="border-color:var(--gold);color:var(--gold)" data-i18n="ov.btn.copy">📋 Kopieren</button>
+          <button class="btn btn-sm mt8 btn-red" onclick="regenCodes()" title="Regen" data-i18n="ov.btn.regen">↻ Codes neu generieren</button>
+        </div></div>
+    </div>
+    <div class="stats mt8">
+      <div class="stat"><div class="sv" id="ov-p">0</div><div class="sl" data-i18n="ov.stat.participants">Teilnehmer</div></div>
+      <div class="stat"><div class="sv" id="ov-i">0</div><div class="sl" data-i18n="ov.stat.items">Loot-Items</div></div>
+      <div class="stat"><div class="sv" id="ov-w">0</div><div class="sl" data-i18n="ov.stat.wishes">Vormerkungen</div></div>
+      <div class="stat"><div class="sv" id="ov-m">3</div><div class="sl" data-i18n="ov.stat.maxw">Max. Wünsche</div></div>
+    </div>
+    <div class="card">
+      <div class="ct" data-i18n="ov.settings.title">◈ Einstellungen</div>
+      <div class="settings-row">
+        <div><div style="font-size:13px;font-weight:500" data-i18n="ov.settings.maxw.label">Max. Wünsche</div><div class="is" data-i18n="ov.settings.maxw.sub">Wie viele Gegenstände darf jeder vormerken?</div></div>
+        <div class="tg" id="mw-adm" style="width:210px;flex-shrink:0">
+          <button class="tgl" data-v="1" onclick="setMW(1)">1</button><button class="tgl" data-v="2" onclick="setMW(2)">2</button>
+          <button class="tgl" data-v="3" onclick="setMW(3)">3</button><button class="tgl" data-v="4" onclick="setMW(4)">4</button>
+          <button class="tgl" data-v="5" onclick="setMW(5)">5</button><button class="tgl" data-v="6" onclick="setMW(6)">6</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <!-- participants -->
+  <div id="at-pa-c" class="H">
+    <div class="card"><div class="ct" data-i18n="pa.add.title">◈ Teilnehmer hinzufügen</div>
+      <div class="row c">
+        <div class="f1 acw"><input id="p-inp" data-i18n-ph="pa.add.placeholder" placeholder="Name(n) — Komma für mehrere..." onkeydown="if(event.key==='Enter')addP()" oninput="acP(this.value)"/>
+          <div class="acd" id="p-ac"></div></div>
+        <button class="btn btn-acc" onclick="addP()" data-i18n="pa.add.btn">+ Hinzufügen</button>
+      </div>
+    </div>
+    <div class="list" id="adm-p-list"></div>
+  </div>
+  <!-- loot -->
+  <div id="at-lo-c" class="H">
+    <div class="card"><div class="ct" data-i18n="lo.add.title">◈ Gegenstand hinzufügen</div>
+      <div class="row c mb8">
+        <div class="f1 acw"><input id="l-nm" data-i18n-ph="lo.name.placeholder" placeholder="Gegenstandsname..." onkeydown="if(event.key==='Enter')addL()" oninput="acL(this.value)"/>
+          <div class="acd" id="l-ac"></div></div>
+        <input type="number" id="l-qty" value="1" min="1" style="width:60px"/>
+      </div>
+      <label data-i18n="lo.cat.label">Kategorie</label>
+      <div class="tg" id="cat-grp">
+        <button class="tgl si" data-v="item"   onclick="sCat(this)" data-i18n="lo.cat.item">Item</button>
+        <button class="tgl"    data-v="weapon" onclick="sCat(this)" data-i18n="lo.cat.weapon">Ship Weapon</button>
+        <button class="tgl"    data-v="comp"   onclick="sCat(this)" data-i18n="lo.cat.comp">Component</button>
+      </div>
+      <div id="cat-weapon-f" class="H">
+        <label>Größe</label>
+        <div class="tg" id="sw-sz-grp">
+          <button class="tgl" data-v="0" onclick="sWSz(this)">S0</button>
+          <button class="tgl ss" data-v="1" onclick="sWSz(this)">S1</button>
+          <button class="tgl" data-v="2" onclick="sWSz(this)">S2</button>
+          <button class="tgl" data-v="3" onclick="sWSz(this)">S3</button>
+          <button class="tgl" data-v="4" onclick="sWSz(this)">S4</button>
+          <button class="tgl" data-v="5" onclick="sWSz(this)">S5</button>
+          <button class="tgl" data-v="6" onclick="sWSz(this)">S6</button>
+          <button class="tgl" data-v="7" onclick="sWSz(this)">S7</button>
+          <button class="tgl" data-v="8" onclick="sWSz(this)">S8</button>
+        </div>
+      </div>
+      <div id="cat-comp-f" class="H">
+        <label>Klasse</label>
+        <div class="tg" id="ty-grp">
+          <button class="tgl st" data-v="MIL" onclick="sT(this)">MIL</button>
+          <button class="tgl" data-v="STE" onclick="sT(this)">STE</button>
+          <button class="tgl" data-v="COM" onclick="sT(this)">COM</button>
+          <button class="tgl" data-v="CIV" onclick="sT(this)">CIV</button>
+          <button class="tgl" data-v="IND" onclick="sT(this)">IND</button>
+        </div>
+        <label>Grade</label>
+        <div class="tg" id="gr-grp">
+          <button class="tgl sg" data-v="A" onclick="sG(this)">A</button>
+          <button class="tgl" data-v="B" onclick="sG(this)">B</button>
+          <button class="tgl" data-v="C" onclick="sG(this)">C</button>
+          <button class="tgl" data-v="D" onclick="sG(this)">D</button>
+        </div>
+        <label>Größe</label>
+        <div class="tg" id="sz-grp">
+          <button class="tgl" data-v="0" onclick="sS(this)">S0</button>
+          <button class="tgl ss" data-v="1" onclick="sS(this)">S1</button>
+          <button class="tgl" data-v="2" onclick="sS(this)">S2</button>
+          <button class="tgl" data-v="3" onclick="sS(this)">S3</button>
+          <button class="tgl" data-v="4" onclick="sS(this)">S4</button>
+          <button class="tgl" data-v="5" onclick="sS(this)">S5</button>
+          <button class="tgl" data-v="6" onclick="sS(this)">S6</button>
+          <button class="tgl" data-v="7" onclick="sS(this)">S7</button>
+          <button class="tgl" data-v="8" onclick="sS(this)">S8</button>
+        </div>
+      </div>
+      <button class="btn btn-acc btn-full mt8" onclick="addL()" data-i18n="lo.add.btn">+ Hinzufügen</button>
+    </div>
+    <div class="list" id="adm-l-list"></div>
+  </div>
+  <!-- commodities -->
+  <div id="at-co-c" class="H">
+    <div class="card"><div class="ct" data-i18n="co.add.title">◈ Ware hinzufügen</div>
+      <div class="row c mb8">
+        <div class="f1 acw"><input id="co-nm" data-i18n-ph="co.name.placeholder" placeholder="Warenname..." oninput="acCo(this.value)" onkeydown="if(event.key==='Enter')addCom()"/>
+          <div class="acd" id="co-ac"></div></div>
+        <input type="number" id="co-scu" data-i18n-ph="co.scu.placeholder" placeholder="SCU" min="0" step="0.1" style="width:80px"/>
+        <button class="btn btn-acc" onclick="addCom()" data-i18n="co.add.btn">+ Hinzufügen</button>
+      </div>
+    </div>
+    <div class="list" id="adm-c-list"></div>
+    <div class="card mt8">
+      <div class="ct" data-i18n="co.rev.title">◈ Erlös</div>
+      <div class="row c mb8" style="flex-wrap:wrap;gap:6px">
+        <input type="number" id="rev-add-inp" data-i18n-ph="co.rev.placeholder" placeholder="Betrag hinzufügen (aUEC)..." min="0" style="flex:1;min-width:140px" onkeydown="if(event.key==='Enter')addRevenue()"/>
+        <button class="btn btn-acc btn-sm" onclick="addRevenue()" data-i18n="co.rev.btn.add">+ Hinzufügen</button>
+        <button class="btn btn-sm btn-red" onclick="resetRevenue()" data-i18n="co.rev.btn.reset" title="Reset">✕</button>
+      </div>
+      <div style="font-family:monospace;font-size:11px;color:var(--t2);margin-bottom:8px" data-i18n="co.rev.total.label">Gesamterlös: <span id="rev-total-display" style="color:var(--acc);font-weight:700">—</span> aUEC</div>
+      <div id="co-summary"></div>
+    </div>
+  </div>
+  <!-- raffle -->
+  <div id="at-ra-c" class="H">
+    <div class="stats">
+      <div class="stat"><div class="sv" id="r-p">0</div><div class="sl" data-i18n="ov.stat.participants">Teilnehmer</div></div>
+      <div class="stat"><div class="sv" id="r-i">0</div><div class="sl" data-i18n="ov.stat.items">Loot-Items</div></div>
+      <div class="stat"><div class="sv" id="r-w">0</div><div class="sl" data-i18n="ov.stat.wishes">Vormerkungen</div></div>
+    </div>
+    <div id="raffle-mode-info" class="alert a-warn H"></div>
+    <button class="btn btn-gold btn-full mb8" id="raffle-btn" data-i18n="ra.btn.start" onclick="runRaffle()" style="font-size:13px;font-weight:700;letter-spacing:1px;padding:11px">⟳ VERLOSUNG STARTEN</button>
+    <div id="raffle-res"></div>
+  </div>
+</div>
+
+<!-- PARTICIPANT VIEW -->
+<div class="page H" id="pg-part">
+  <div class="ph"><div><h1 id="pt-title">EVENT</h1><p data-i18n="pt.sub">TEILNEHMER-ANSICHT</p></div></div>
+  <div id="pt-sel">
+    <div class="card"><div class="ct" data-i18n="pt.sel.title">◈ Wer bist du?</div>
+      <div class="alert a-info mb8" data-i18n="pt.sel.info">Wähle deinen Namen oder trage dich neu ein.</div>
+      <div class="row c mb8">
+        <div class="f1 acw">
+          <input id="pt-nm-inp" data-i18n-ph="pt.sel.placeholder" placeholder="Deinen Namen eingeben..." onkeydown="if(event.key==='Enter')selfReg()" oninput="acPt(this.value)"/>
+          <div class="acd" id="pt-nm-ac"></div>
+        </div>
+        <button class="btn btn-acc" onclick="selfReg()" data-i18n="pt.sel.btn">+ Eintragen</button>
+      </div>
+      <div class="list" id="pt-nm-list"></div>
+    </div>
+  </div>
+  <div id="pt-wish" class="H">
+    <div class="card">
+      <div class="ct" data-i18n="pt.wish.title">◈ Deine Auswahl</div>
+      <div id="pt-id-bar" class="alert a-info mb8"></div>
+      <div id="pt-lock-warn" class="alert a-warn H">🔒 Session gesperrt.</div>
+      <div id="pt-mode-info" class="alert a-warn H"></div>
+      <div class="qbar" id="qbar"></div>
+      <div class="list" id="pt-w-list"></div>
+      <button class="btn btn-acc btn-full mt8" id="save-w-btn" onclick="saveWishes()" data-i18n="pt.wish.save">✓ Speichern</button>
+    </div>
+  </div>
+  <div id="pt-wait" class="H">
+    <div style="max-width:560px;margin:0 auto">
+      <div class="alert a-info mb8" id="pt-wait-identity" style="font-weight:600"></div>
+      <div class="waiting" style="padding:24px 20px">
+        <div class="wait-icon">◈</div>
+        <div style="font-family:monospace;font-size:15px;font-weight:700;color:var(--t1);letter-spacing:2px" data-i18n="pt.wait.title">BITTE WARTEN</div>
+        <div style="font-family:monospace;font-size:11px;color:var(--t2);margin-top:6px" data-i18n="pt.wait.sub">Die Verlosung wurde noch nicht durchgeführt.</div>
+        <div style="display:flex;gap:8px;justify-content:center;margin-top:12px">
+          <button class="btn btn-sm btn-acc" onclick="showPtWishes()" data-i18n="pt.wait.btn.change">✎ Auswahl ändern</button>
+          <button class="btn btn-sm" onclick="ptReload()" data-i18n="pt.wait.btn.refresh">↺ Aktualisieren</button>
+        </div>
+      </div>
+      <div class="card" style="margin-top:0">
+        <div class="ct" data-i18n="pt.wait.sel.title">◈ Deine aktuelle Auswahl</div>
+        <div id="pt-wait-sel-content" class="list"></div>
+      </div>
+    </div>
+  </div>
+  <div id="pt-result" class="H">
+    <div class="card"><div class="ct" data-i18n="pt.result.title">◈ Deine Gewinne</div><div id="pt-res-content"></div></div>
+  </div>
+</div>
+
+<!-- SUPERADMIN -->
+<div class="page H" id="pg-super">
+  <div class="ph"><div><h1>ADMINISTRATION</h1><p data-i18n="sa.sub">SYSTEM // VOLLZUGRIFF</p></div>
+    <div class="ph-r"><button class="btn btn-sm" onclick="goHome()" data-i18n="btn.back">← Zurück</button></div>
+  </div>
+  <div class="tabs">
+    <button class="tab active" onclick="saTab('ev')" id="st-ev" data-i18n="sa.tab.events">Events</button>
+    <button class="tab" onclick="saTab('it')" id="st-it" data-i18n="sa.tab.items">Gegenstände-DB</button>
+    <button class="tab" onclick="saTab('pn')" id="st-pn" data-i18n="sa.tab.participants">Teilnehmer-DB</button>
+    <button class="tab" onclick="saTab('co')" id="st-co" data-i18n="sa.tab.commodities">Waren-DB</button>
+    <button class="tab" onclick="saTab('uex')" id="st-uex" data-i18n="sa.tab.uex">UEX Import</button>
+    <button class="tab" onclick="saTab('set')" id="st-set" data-i18n="sa.tab.settings">Einstellungen</button>
+  </div>
+  <div id="st-ev-c"><div class="list" id="sa-ev-list"></div></div>
+  <div id="st-it-c" class="H">
+    <div class="card"><div class="ct" data-i18n="sa.add.item.title">◈ Gegenstand hinzufügen</div>
+      <div class="mb8"><input id="sa-l-nm" data-i18n-ph="sa.add.item.placeholder" placeholder="Name..."/></div>
+      <label data-i18n="lo.cat.label">Kategorie</label>
+      <div class="tg" id="sa-cat-grp">
+        <button class="tgl si" data-v="item"   onclick="saSCat(this)">Item</button>
+        <button class="tgl"    data-v="weapon" onclick="saSCat(this)">Ship Weapon</button>
+        <button class="tgl"    data-v="comp"   onclick="saSCat(this)">Component</button>
+      </div>
+      <div id="sa-weapon-f" class="H">
+        <label>Größe</label>
+        <div class="tg" id="sa-sw-sz-grp">
+          <button class="tgl" data-v="0" onclick="saSWSz(this)">S0</button>
+          <button class="tgl ss" data-v="1" onclick="saSWSz(this)">S1</button>
+          <button class="tgl" data-v="2" onclick="saSWSz(this)">S2</button>
+          <button class="tgl" data-v="3" onclick="saSWSz(this)">S3</button>
+          <button class="tgl" data-v="4" onclick="saSWSz(this)">S4</button>
+          <button class="tgl" data-v="5" onclick="saSWSz(this)">S5</button>
+          <button class="tgl" data-v="6" onclick="saSWSz(this)">S6</button>
+          <button class="tgl" data-v="7" onclick="saSWSz(this)">S7</button>
+          <button class="tgl" data-v="8" onclick="saSWSz(this)">S8</button>
+        </div>
+      </div>
+      <div id="sa-comp-f" class="H">
+        <label>Klasse</label>
+        <div class="tg" id="sa-ty-grp">
+          <button class="tgl st" data-v="MIL" onclick="saST(this)">MIL</button>
+          <button class="tgl" data-v="STE" onclick="saST(this)">STE</button>
+          <button class="tgl" data-v="COM" onclick="saST(this)">COM</button>
+          <button class="tgl" data-v="CIV" onclick="saST(this)">CIV</button>
+          <button class="tgl" data-v="IND" onclick="saST(this)">IND</button>
+        </div>
+        <label>Grade</label>
+        <div class="tg" id="sa-gr-grp">
+          <button class="tgl sg" data-v="A" onclick="saSG(this)">A</button>
+          <button class="tgl" data-v="B" onclick="saSG(this)">B</button>
+          <button class="tgl" data-v="C" onclick="saSG(this)">C</button>
+          <button class="tgl" data-v="D" onclick="saSG(this)">D</button>
+        </div>
+        <label>Größe</label>
+        <div class="tg" id="sa-sz-grp">
+          <button class="tgl" data-v="0" onclick="saSS(this)">S0</button>
+          <button class="tgl ss" data-v="1" onclick="saSS(this)">S1</button>
+          <button class="tgl" data-v="2" onclick="saSS(this)">S2</button>
+          <button class="tgl" data-v="3" onclick="saSS(this)">S3</button>
+          <button class="tgl" data-v="4" onclick="saSS(this)">S4</button>
+          <button class="tgl" data-v="5" onclick="saSS(this)">S5</button>
+          <button class="tgl" data-v="6" onclick="saSS(this)">S6</button>
+          <button class="tgl" data-v="7" onclick="saSS(this)">S7</button>
+          <button class="tgl" data-v="8" onclick="saSS(this)">S8</button>
+        </div>
+      </div>
+      <button class="btn btn-acc btn-full mt8" onclick="saAddItem()" data-i18n="sa.add.item.btn">+ Hinzufügen</button>
+    </div>
+    <div class="list" id="sa-it-list"></div>
+  </div>
+  <div id="st-pn-c" class="H">
+    <div class="card"><div class="ct" data-i18n="sa.add.participant.title">◈ Name hinzufügen</div>
+      <div class="row c"><input id="sa-pn-inp" data-i18n-ph="sa.add.participant.placeholder" class="f1" placeholder="Name..." onkeydown="if(event.key==='Enter')saAddPN()"/>
+        <button class="btn btn-acc" onclick="saAddPN()" data-i18n="sa.add.participant.btn">+ Hinzufügen</button></div>
+    </div>
+    <div class="list" id="sa-pn-list"></div>
+  </div>
+  <div id="st-co-c" class="H">
+    <div class="card"><div class="ct" data-i18n="sa.add.commodity.title">◈ Ware hinzufügen</div>
+      <div class="row c"><input id="sa-co-inp" data-i18n-ph="sa.add.commodity.placeholder" class="f1" placeholder="Warenname..." onkeydown="if(event.key==='Enter')saAddCo()"/>
+        <button class="btn btn-acc" onclick="saAddCo()" data-i18n="sa.add.commodity.btn">+ Hinzufügen</button></div>
+    </div>
+    <div class="list" id="sa-co-list"></div>
+  </div>
+  <div id="st-set-c" class="H">
+    <div class="card">
+      <div class="ct" data-i18n="sa.set.title">◈ Admin-Kennwort ändern</div>
+      <div class="alert a-warn mb8" data-i18n="sa.set.warn">Das neue Kennwort wird sofort aktiv. Notiere es — es wird beim nächsten Start in der Konsole angezeigt.</div>
+      <div class="mb8"><label data-i18n="sa.set.cur.label">Aktuelles Kennwort</label>
+        <input type="password" id="pw-current" data-i18n-ph="sa.set.cur.label" placeholder="Aktuelles Admin-Secret..."/></div>
+      <div class="mb8"><label data-i18n="sa.set.new.label">Neues Kennwort (min. 6 Zeichen)</label>
+        <input type="password" id="pw-new" data-i18n-ph="sa.set.new.label" placeholder="Neues Kennwort..."/></div>
+      <div class="mb8"><label data-i18n="sa.set.rep.label">Neues Kennwort wiederholen</label>
+        <input type="password" id="pw-repeat" data-i18n-ph="sa.set.rep.label" placeholder="Wiederholen..."/></div>
+      <button class="btn btn-acc btn-full" onclick="changePw()" data-i18n="sa.set.btn">✓ Kennwort ändern</button>
+      <div id="pw-result" class="mt8"></div>
+    </div>
+  </div>
+  <div id="st-uex-c" class="H">
+    <div class="card">
+      <div class="ct" data-i18n="sa.uex.title">◈ UEX Corp Komponenten-Import</div>
+      <div class="alert a-info mb8" data-i18n="sa.uex.info">Lädt aktuelle Schiffskomponenten von uexcorp.space und aktualisiert die lokale Gegenstandsdatenbank. Nur neue Einträge werden hinzugefügt.</div>
+      <button class="btn btn-acc btn-full mb8" id="uex-btn" onclick="runUex()" data-i18n="sa.uex.btn">⬇ Jetzt von UEX Corp importieren</button>
+      <div id="uex-result"></div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/i18n.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
+
