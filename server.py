@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
 """SCLM — Web Server. Start: python server.py"""
-import sqlite3, os, json, random, string, re, sys, secrets, urllib.request
+import sqlite3, os, json, random, string, re, sys, secrets, time, threading, functools, urllib.request
+from collections import deque
 from pathlib import Path
 from datetime import datetime
 from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
 
 BASE = Path(__file__).parent
-# In Docker: store data.db in /data volume; locally next to script
-_data_dir = Path(os.environ.get("DATA_DIR", str(BASE)))
+# Datenbank NIE direkt im Projekt-Root (würde im Web ausgeliefert, wenn root served).
+# Ohne DATA_DIR liegt data.db in einem Instanz-Unterordner außerhalb der served Pfade.
+_data_dir = Path(os.environ.get("DATA_DIR", str(BASE / "instance")))
+_data_dir.mkdir(parents=True, exist_ok=True)
 DB = _data_dir / "data.db"
-app  = Flask(__name__, static_folder=str(BASE), static_url_path="")
-app.static_folder = str(BASE)  # serves /static/ automatically via Flask defaults
-
-# Explicit static subfolder for favicons
-@app.route("/static/<path:filename>")
-def static_files(filename):
-    return send_from_directory(str(BASE / "static"), filename)
-CORS(app)
+# Nur static/ + index.html werden ausgeliefert — NIEMALS der App-Root.
+app = Flask(__name__, static_folder=str(BASE / "static"))
 
 def get_db():
     con = sqlite3.connect(DB)
@@ -59,7 +55,7 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS participants (
             id TEXT PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL,
-            added_by TEXT NOT NULL DEFAULT 'admin',
+            added_by TEXT NOT NULL DEFAULT 'admin', pcode TEXT,
             FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS wishes (
@@ -126,6 +122,8 @@ def init_db():
         except: pass
         try: con.execute("CREATE TABLE IF NOT EXISTS commodity_db (name TEXT PRIMARY KEY)")
         except: pass
+        try: con.execute("ALTER TABLE participants ADD COLUMN pcode TEXT")
+        except: pass
         row = con.execute("SELECT value FROM config WHERE key='admin_secret'").fetchone()
         if not row:
             con.execute("INSERT INTO config(key,value) VALUES('admin_secret',?)", (secrets.token_hex(16),))
@@ -152,6 +150,63 @@ def row_to_dict(r): return dict(r) if r else None
 def rows_to_list(r): return [dict(x) for x in r]
 def is_admin(s,code): return s and s["admin_code"]==code.upper()
 
+# ── rate limiting (in-memory, je IP) ─────────────────────────────────────────
+_RATE = {}
+_RATE_LOCK = threading.Lock()
+
+def _client_ip():
+    # Vorgezogene Header nur für common proxies; remote_addr ist der harte Fallback.
+    return request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote_addr or "?"
+
+def rate_limit(key, limit, window):
+    """Führt maximal `limit` Requests pro `window` Sekunden pro IP auf dem Endpoint aus."""
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            ip = _client_ip()
+            k = f"{key}:{ip}"
+            now = time.time()
+            with _RATE_LOCK:
+                hits = _RATE.get(k)
+                if hits is None:
+                    _RATE[k] = deque()
+                    hits = _RATE[k]
+                # alte Hits raus
+                while hits and hits[0] < now - window:
+                    hits.popleft()
+                if len(hits) >= limit:
+                    return jsonify({"error": "Zu viele Anfragen. Bitte später erneut versuchen."}), 429
+                hits.append(now)
+                # Speicher begrenzen (grobe Bereinigung)
+                if len(_RATE) > 20000:
+                    _RATE.clear()
+            return fn(*args, **kwargs)
+        return wrapper
+    return deco
+
+# ── input sanitization (H3, M2) ──────────────────────────────────────────────
+def sanitize_image_url(u):
+    """image_url: nur http(s)-URLs, begrenzte Länge, kein führendes/umgebendes whitespace."""
+    if u is None:
+        return None
+    u = str(u).strip()
+    if not u:
+        return None
+    if len(u) > 2048:
+        return None
+    if not re.match(r"^https?://", u, re.I):
+        return None
+    # Kontrollzeichen / quotes sind in HTML-Attribut- und CSS-Kontexten gefährlich
+    if re.search(r"[\x00-\x1f\x7f<>\"']", u):
+        return None
+    return u
+
+def is_intlike(v):
+    try:
+        int(v); return True
+    except (TypeError, ValueError):
+        return False
+
 def load_session(sid_or_code, by_code=False):
     with get_db() as con:
         if by_code:
@@ -162,11 +217,13 @@ def load_session(sid_or_code, by_code=False):
             s = row_to_dict(con.execute("SELECT * FROM sessions WHERE id=?",(sid_or_code,)).fetchone())
         if not s: return None
         s["participants"] = rows_to_list(con.execute(
-            "SELECT * FROM participants WHERE session_id=? ORDER BY name COLLATE NOCASE",(s["id"],)).fetchall())
+            "SELECT id, session_id, name, added_by FROM participants WHERE session_id=? ORDER BY name COLLATE NOCASE",(s["id"],)).fetchall())
         s["loot"] = rows_to_list(con.execute(
             "SELECT * FROM loot WHERE session_id=? ORDER BY name COLLATE NOCASE",(s["id"],)).fetchall())
         for l in s["loot"]:
-            l["wish_count"] = con.execute("SELECT COUNT(*) FROM wishes WHERE loot_id=?",(l["id"],)).fetchone()[0]
+            l["wish_count"] = con.execute(
+                "SELECT COUNT(*) FROM wishes w JOIN loot l2 ON w.loot_id=l2.id "
+                "WHERE l2.session_id=? AND w.loot_id=?",(s["id"],l["id"])).fetchone()[0]
         for p in s["participants"]:
             p["wishes"] = [r["loot_id"] for r in con.execute(
                 "SELECT loot_id FROM wishes WHERE participant_id=?",(p["id"],)).fetchall()]
@@ -256,13 +313,21 @@ def list_sessions():
 
 @app.route("/api/session/create", methods=["POST"])
 def create_session():
-    data=request.json; name=(data.get("name") or "").strip()
+    data=request.json or {}; name=(data.get("name") or "").strip()
     if not name: return jsonify({"error":"Name erforderlich"}),400
+    if len(name) > 200: return jsonify({"error":"Name zu lang"}),400
+    mw = data.get("max_wishes", 3)
+    try:
+        max_wishes = int(mw)
+    except (TypeError, ValueError):
+        return jsonify({"error":"max_wishes muss eine Ganzzahl sein"}),400
+    if not (1 <= max_wishes <= 10):
+        return jsonify({"error":"max_wishes muss zwischen 1 und 10 liegen"}),400
     sid=uid(); ac=code6(); jc=code6()
-    image_url = (data.get("image_url") or "").strip() or None
+    image_url = sanitize_image_url(data.get("image_url"))
     with get_db() as con:
         con.execute("INSERT INTO sessions(id,name,created,admin_code,join_code,max_wishes,image_url) VALUES(?,?,?,?,?,?,?)",
-            (sid,name,datetime.now().strftime("%d.%m.%Y"),ac,jc,int(data.get("max_wishes",3)),image_url))
+            (sid,name,datetime.now().strftime("%d.%m.%Y"),ac,jc,max_wishes,image_url))
     return jsonify({"id":sid,"admin_code":ac,"join_code":jc})
 
 @app.route("/api/session/<code>")
@@ -272,17 +337,27 @@ def get_session(code):
     admin=is_admin(s,code)
     s["is_admin"]=admin
     if not admin: s.pop("admin_code",None)
+    else:
+        # Admin sieht die Teilnehmer-Keys, um sie an Teilnehmer weitergeben zu können
+        with get_db() as con:
+            for p in s["participants"]:
+                r=con.execute("SELECT pcode FROM participants WHERE id=?",(p["id"],)).fetchone()
+                if r: p["pcode"]=r[0]
     return jsonify(s)
 
 @app.route("/api/session/<sid>/settings", methods=["PATCH"])
 def update_settings(sid):
-    data=request.json; code=(data.get("code") or "").upper()
+    data=request.json or {}; code=(data.get("code") or "").upper()
     s=load_session(sid)
     if not s: return jsonify({"error":"Nicht gefunden"}),404
     if not is_admin(s,code) and data.get("secret","")!=get_admin_secret():
         return jsonify({"error":"Nicht autorisiert"}),403
     with get_db() as con:
-        if "max_wishes"     in data: con.execute("UPDATE sessions SET max_wishes=? WHERE id=?",(int(data["max_wishes"]),sid))
+        if "max_wishes" in data:
+            try: mw=int(data["max_wishes"])
+            except (TypeError, ValueError): return jsonify({"error":"max_wishes muss eine Ganzzahl sein"}),400
+            if not (1<=mw<=10): return jsonify({"error":"max_wishes muss zwischen 1 und 10 liegen"}),400
+            con.execute("UPDATE sessions SET max_wishes=? WHERE id=?",(mw,sid))
         if "locked" in data:
             if data["locked"]:  # anyone authorised can lock
                 con.execute("UPDATE sessions SET locked=1 WHERE id=?",(sid,))
@@ -290,12 +365,22 @@ def update_settings(sid):
                 con.execute("UPDATE sessions SET locked=0 WHERE id=?",(sid,))
             else:
                 return jsonify({"error":"Nur ein Administrator kann entsperren"}),403
-        if "name"           in data: con.execute("UPDATE sessions SET name=? WHERE id=?",(data["name"].strip(),sid))
-        if "total_revenue"  in data:
+        if "name" in data:
+            nm=(data["name"] or "").strip()
+            if not nm: return jsonify({"error":"Name erforderlich"}),400
+            if len(nm) > 200: return jsonify({"error":"Name zu lang"}),400
+            con.execute("UPDATE sessions SET name=? WHERE id=?",(nm,sid))
+        if "total_revenue" in data:
             rv=data["total_revenue"]
-            con.execute("UPDATE sessions SET total_revenue=? WHERE id=?",(float(rv) if rv not in (None,"") else None,sid))
+            if rv in (None,""):
+                con.execute("UPDATE sessions SET total_revenue=NULL WHERE id=?",(sid,))
+            else:
+                try: rv=float(rv)
+                except (TypeError, ValueError): return jsonify({"error":"total_revenue muss eine Zahl sein"}),400
+                if rv < 0: return jsonify({"error":"total_revenue darf nicht negativ sein"}),400
+                con.execute("UPDATE sessions SET total_revenue=? WHERE id=?",(rv,sid))
         if "image_url" in data:
-            con.execute("UPDATE sessions SET image_url=? WHERE id=?",((data["image_url"] or None),sid))
+            con.execute("UPDATE sessions SET image_url=? WHERE id=?",(sanitize_image_url(data["image_url"]),sid))
         if "raffle_locked" in data:
             con.execute("UPDATE sessions SET raffle_locked=? WHERE id=?",(1 if data["raffle_locked"] else 0,sid))
         if "commodities_locked" in data:
@@ -327,9 +412,10 @@ def delete_session(sid):
 # ── participants ──────────────────────────────────────────────────────────────
 @app.route("/api/session/<sid>/participants", methods=["POST"])
 def add_participant(sid):
-    data=request.json; code=(data.get("code") or "").upper()
+    data=request.json or {}; code=(data.get("code") or "").upper()
     name=(data.get("name") or "").strip()
     if not name: return jsonify({"error":"Name erforderlich"}),400
+    if len(name) > 120: return jsonify({"error":"Name zu lang"}),400
     s=load_session(sid)
     if not s: return jsonify({"error":"Nicht gefunden"}),404
     admin=is_admin(s,code)
@@ -339,9 +425,12 @@ def add_participant(sid):
         ex=con.execute("SELECT id FROM participants WHERE session_id=? AND lower(name)=lower(?)",(sid,name)).fetchone()
         if ex: return jsonify({"error":"Name bereits vorhanden","id":ex["id"]}),409
         pid=uid()
-        con.execute("INSERT INTO participants(id,session_id,name,added_by) VALUES(?,?,?,?)",
-            (pid,sid,name,"admin" if admin else "self"))
-    return jsonify({"id":pid,"name":name})
+        # Eigentümerschaft-Secret: nur bei Selbstregistrierung setzen. Admin-angelegte
+        # Teilnehmer bleiben pcode-NULL und werden per Claim (erster join_code-Save) gebunden.
+        pcode = secrets.token_urlsafe(16) if not admin else None
+        con.execute("INSERT INTO participants(id,session_id,name,added_by,pcode) VALUES(?,?,?,?,?)",
+            (pid,sid,name,"admin" if admin else "self",pcode))
+    return jsonify({"id":pid,"name":name,"pcode":pcode})
 
 @app.route("/api/session/<sid>/participants/<pid>", methods=["DELETE"])
 def remove_participant(sid,pid):
@@ -376,7 +465,11 @@ def add_loot(sid):
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
     name=(data.get("name") or "").strip()
     if not name: return jsonify({"error":"Name erforderlich"}),400
-    qty=max(1,int(data.get("qty",1))); typ=data.get("type") or None
+    if len(name) > 120: return jsonify({"error":"Name zu lang"}),400
+    try: qty=int(data.get("qty",1))
+    except (TypeError, ValueError): return jsonify({"error":"qty muss eine Ganzzahl sein"}),400
+    qty=max(1,qty)
+    typ=data.get("type") or None
     grade=data.get("grade") or None; size=data.get("size") or None
     key=loot_key(name,typ,grade,size)
     with get_db() as con:
@@ -408,7 +501,8 @@ def update_loot_qty(sid,lid):
     s=load_session(sid)
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
-    delta=int(data.get("delta",0))
+    try: delta=int(data.get("delta",0))
+    except (TypeError, ValueError): return jsonify({"error":"delta muss eine Ganzzahl sein"}),400
     with get_db() as con:
         con.execute("UPDATE loot SET qty=MAX(1,qty+?) WHERE id=? AND session_id=?",(delta,lid,sid))
     return jsonify({"ok":True})
@@ -428,24 +522,58 @@ def update_loot_sale(sid,lid):
                 con.execute("DELETE FROM no_interest WHERE loot_id=?",(lid,))
         if "sale_revenue" in data:
             rv=data["sale_revenue"]
-            con.execute("UPDATE loot SET sale_revenue=? WHERE id=? AND session_id=?",
-                (float(rv) if rv not in (None,"") else None,lid,sid))
+            if rv in (None,""):
+                con.execute("UPDATE loot SET sale_revenue=NULL WHERE id=? AND session_id=?",(lid,sid))
+            else:
+                try: rv=float(rv)
+                except (TypeError, ValueError): return jsonify({"error":"sale_revenue muss eine Zahl sein"}),400
+                if rv < 0: return jsonify({"error":"sale_revenue darf nicht negativ sein"}),400
+                con.execute("UPDATE loot SET sale_revenue=? WHERE id=? AND session_id=?",(rv,lid,sid))
     return jsonify({"ok":True})
 
 # ── wishes & no-interest ──────────────────────────────────────────────────────
 @app.route("/api/session/<sid>/wishes", methods=["POST"])
 def set_wishes(sid):
-    data=request.json; code=(data.get("code") or "").upper()
+    data=request.json or {}; code=(data.get("code") or "").upper()
     pid=data.get("participant_id"); lids=data.get("loot_ids",[])
     mode=data.get("mode","wish")   # 'wish' or 'no_interest'
+    if not isinstance(lids, list): return jsonify({"error":"loot_ids muss eine Liste sein"}),400
+    if not pid: return jsonify({"error":"participant_id erforderlich"}),400
     s=load_session(sid)
     if not s: return jsonify({"error":"Nicht gefunden"}),404
     admin=is_admin(s,code)
     if not admin and code!=s["join_code"]: return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
-    if mode=="wish" and len(lids)>s["max_wishes"] and not admin:
-        return jsonify({"error":f"Maximal {s['max_wishes']} Wünsche erlaubt"}),400
+    # H5: join_code-Nutzer dürfen nur IHREN eigenen Teilnehmerdatensatz ändern.
+    if not admin:
+        if mode=="wish" and len(lids)>s["max_wishes"]:
+            return jsonify({"error":f"Maximal {s['max_wishes']} Wünsche erlaubt"}),400
+        pcode=(data.get("pcode") or "").strip()
+        if not pcode:
+            return jsonify({"error":"Eigentumsnachweis fehlt"}),403
+        with get_db() as con:
+            owner=row_to_dict(con.execute(
+                "SELECT pcode FROM participants WHERE id=? AND session_id=?",(pid,sid)).fetchone())
+        if not owner:
+            return jsonify({"error":"Nicht autorisiert für diesen Teilnehmer"}),403
+        if owner["pcode"] is None:
+            # Legacy/Admin-angelegte Teilnehmer ohne Key: der erste Teilnehmer mit
+            # join_code, der sich für den Datensatz erklärt, bindet ihn (Claim).
+            with get_db() as con:
+                con.execute("UPDATE participants SET pcode=? WHERE id=? AND pcode IS NULL",(pcode,pid))
+        elif owner["pcode"]!=pcode:
+            return jsonify({"error":"Nicht autorisiert für diesen Teilnehmer"}),403
     with get_db() as con:
+        # pids gegen Session prüfen (Teilnehmer muss existieren)
+        if not con.execute("SELECT 1 FROM participants WHERE id=? AND session_id=?",(pid,sid)).fetchone():
+            return jsonify({"error":"Teilnehmer nicht in dieser Session"}),404
+        # M3: alle loot_ids müssen zur Session gehören
+        valid=[r["id"] for r in con.execute(
+            "SELECT id FROM loot WHERE session_id=?",(sid,)).fetchall()]
+        valid=set(valid)
+        for lid in lids:
+            if lid not in valid:
+                return jsonify({"error":"Ungültiges Loot-Item für diese Session"}),400
         if mode=="no_interest":
             con.execute("DELETE FROM no_interest WHERE participant_id=? AND session_id=?",(pid,sid))
             for lid in lids:
@@ -467,7 +595,10 @@ def add_commodity(sid):
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
     name=(data.get("name") or "").strip()
     if not name: return jsonify({"error":"Name erforderlich"}),400
-    scu=float(data.get("scu",0))
+    if len(name) > 120: return jsonify({"error":"Name zu lang"}),400
+    try: scu=float(data.get("scu",0) or 0)
+    except (TypeError, ValueError): return jsonify({"error":"scu muss eine Zahl sein"}),400
+    if scu < 0: return jsonify({"error":"scu darf nicht negativ sein"}),400
     with get_db() as con:
         ex=con.execute("SELECT id FROM commodities WHERE session_id=? AND lower(name)=lower(?)",(sid,name)).fetchone()
         if ex:
@@ -485,7 +616,11 @@ def update_commodity(sid,cid):
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
     with get_db() as con:
-        if "scu"  in data: con.execute("UPDATE commodities SET scu=? WHERE id=? AND session_id=?",(float(data["scu"]),cid,sid))
+        if "scu"  in data:
+            try: scu=float(data["scu"] or 0)
+            except (TypeError, ValueError): return jsonify({"error":"scu muss eine Zahl sein"}),400
+            if scu < 0: return jsonify({"error":"scu darf nicht negativ sein"}),400
+            con.execute("UPDATE commodities SET scu=? WHERE id=? AND session_id=?",(scu,cid,sid))
         if "name" in data: con.execute("UPDATE commodities SET name=? WHERE id=? AND session_id=?",((data["name"] or "").strip(),cid,sid))
     return jsonify({"ok":True})
 
@@ -495,7 +630,8 @@ def update_commodity_qty(sid,cid):
     s=load_session(sid)
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
-    delta=float(data.get("delta",0))
+    try: delta=float(data.get("delta",0) or 0)
+    except (TypeError, ValueError): return jsonify({"error":"delta muss eine Zahl sein"}),400
     with get_db() as con:
         con.execute("UPDATE commodities SET scu=MAX(0,scu+?) WHERE id=? AND session_id=?",(delta,cid,sid))
     return jsonify({"ok":True})
@@ -512,6 +648,7 @@ def delete_commodity(sid,cid):
 
 # ── raffle ────────────────────────────────────────────────────────────────────
 @app.route("/api/session/<sid>/raffle", methods=["POST"])
+@rate_limit("raffle", 20, 60)
 def run_raffle(sid):
     data=request.json; code=(data.get("code") or "").upper()
     s=load_session(sid)
@@ -602,7 +739,7 @@ def run_raffle(sid):
 
 @app.route("/api/session/<sid>/raffle/<rid>", methods=["PATCH"])
 def update_result(sid,rid):
-    data=request.json; code=(data.get("code") or "").upper()
+    data=request.json or {}; code=(data.get("code") or "").upper()
     s=load_session(sid)
     if not s: return jsonify({"error":"Nicht gefunden"}),404
     admin=is_admin(s,code)
@@ -611,17 +748,31 @@ def update_result(sid,rid):
     if not admin and not is_super and not join_code:
         return jsonify({"error":"Nicht autorisiert"}),403
     with get_db() as con:
-        if join_code and not admin and not is_super:
+        r=row_to_dict(con.execute("SELECT * FROM raffle_results WHERE id=? AND session_id=?",(rid,sid)).fetchone())
+        if not r: return jsonify({"error":"Nicht gefunden"}),404
+    if join_code and not admin and not is_super:
+        # H5: Teilnehmer dürfen nur IHREN eigenen Gewinn markieren (per pcode).
+        with get_db() as con:
+            owner=row_to_dict(con.execute(
+                "SELECT pcode FROM participants WHERE id=? AND session_id=?",(r["participant_id"],sid)).fetchone())
+        pcode=(data.get("pcode") or "").strip()
+        if not owner or not pcode:
+            return jsonify({"error":"Nicht autorisiert für diesen Gewinn"}),403
+        if owner["pcode"] is None:
+            with get_db() as con:
+                con.execute("UPDATE participants SET pcode=? WHERE id=? AND pcode IS NULL",(pcode,r["participant_id"]))
+        elif owner["pcode"]!=pcode:
+            return jsonify({"error":"Nicht autorisiert für diesen Gewinn"}),403
+        with get_db() as con:
             # Participants: one-way only (can set but not unset)
-            r=row_to_dict(con.execute("SELECT * FROM raffle_results WHERE id=? AND session_id=?",(rid,sid)).fetchone())
-            if not r: return jsonify({"error":"Nicht gefunden"}),404
             if "waived"    in data and data["waived"]    and not r["waived"]:
                 con.execute("UPDATE raffle_results SET waived=1 WHERE id=?",(rid,))
             if "collected" in data and data["collected"] and not r["collected"]:
                 con.execute("UPDATE raffle_results SET collected=1 WHERE id=?",(rid,))
-        else:
-            if s["locked"] and not is_super:
-                return jsonify({"error":"Session gesperrt"}),403
+    else:
+        if s["locked"] and not is_super:
+            return jsonify({"error":"Session gesperrt"}),403
+        with get_db() as con:
             if "waived"    in data: con.execute("UPDATE raffle_results SET waived=?    WHERE id=? AND session_id=?",(1 if data["waived"] else 0,rid,sid))
             if "collected" in data: con.execute("UPDATE raffle_results SET collected=? WHERE id=? AND session_id=?",(1 if data["collected"] else 0,rid,sid))
     return jsonify({"ok":True})
@@ -784,11 +935,12 @@ def parse_raidhelper():
     except Exception as e: return jsonify({"error":str(e)}),400
 
 @app.route("/api/admin/change_secret", methods=["POST"])
+@rate_limit("change_secret", 10, 60)
 def change_secret():
-    d=request.json
+    d=request.json or {}
     if d.get("secret","")!=get_admin_secret(): return jsonify({"error":"Aktuelles Kennwort falsch"}),403
     new_secret=(d.get("new_secret") or "").strip()
-    if len(new_secret)<6: return jsonify({"error":"Kennwort muss mindestens 6 Zeichen haben"}),400
+    if len(new_secret)<8: return jsonify({"error":"Kennwort muss mindestens 8 Zeichen haben"}),400
     with get_db() as con:
         con.execute("UPDATE config SET value=? WHERE key='admin_secret'",(new_secret,))
     # Reset setup_viewed so the new secret can be looked up if needed
@@ -798,6 +950,7 @@ def change_secret():
     return jsonify({"ok":True})
 
 @app.route("/api/admin/verify", methods=["POST"])
+@rate_limit("verify", 30, 60)
 def verify_admin():
     d = request.json or {}
     if d.get("secret","") == get_admin_secret():
@@ -818,14 +971,15 @@ def secret_hint():
         "hint": "Dieser Endpunkt ist nur von localhost erreichbar."
     })
 
-@app.route("/setup")
+@app.route("/setup", methods=["GET", "POST"])
 def setup_page():
-    """First-run setup page — only shown once, disappears after being viewed."""
+    """Ersteinrichtung — zeigt das Admin-Secret NUR nach Besitz-Proof.
+    Der Operator kennt das Secret bereits aus der Konsole/Logs (get-secret.sh) und
+    weist es hier nach. Ein anonymer Erst-Besucher erhält KEIN Secret ausgehändigt."""
     with get_db() as con:
         viewed = con.execute("SELECT value FROM config WHERE key='setup_viewed'").fetchone()
         already_viewed = viewed and viewed["value"] == "1"
-    if already_viewed:
-        return """<!DOCTYPE html>
+    done_html = """<!DOCTYPE html>
 <html lang="de"><head><meta charset="UTF-8"><title>SCLM</title>
 <style>body{font-family:monospace;background:#080c10;color:#e8eef4;display:flex;
 align-items:center;justify-content:center;min-height:100vh;margin:0}
@@ -839,44 +993,74 @@ a{color:#1e8bc3;text-decoration:none}</style></head>
 <p>Diese Seite wurde bereits aufgerufen und ist nicht mehr verfügbar.<br><br>
 Das Admin-Secret ist in den <strong>Container-Logs</strong> einsehbar.<br><br>
 <a href="/">← Zur App</a></p>
-</div></body></html>""", 410
-    # Mark as viewed immediately
-    with get_db() as con:
-        con.execute("UPDATE config SET value='1' WHERE key='setup_viewed'")
-    sec = get_admin_secret()
-    return f"""<!DOCTYPE html>
+</div></body></html>"""
+    if already_viewed:
+        return done_html, 410
+    if request.method == "POST":
+        d = request.get_json(silent=True) or request.form
+        provided = (d.get("secret") or "").strip()
+        if provided and provided == get_admin_secret():
+            with get_db() as con:
+                con.execute("UPDATE config SET value='1' WHERE key='setup_viewed'")
+            return f"""<!DOCTYPE html>
+<html lang="de"><head><meta charset="UTF-8"><title>SCLM — Einrichtung bestätigt</title>
+<style>body{{font-family:monospace;background:#080c10;color:#e8eef4;display:flex;
+align-items:center;justify-content:center;min-height:100vh;margin:0}}
+.box{{background:#0d1318;border:1px solid rgba(60,140,200,.4);border-radius:8px;
+padding:40px;max-width:480px;width:90%;text-align:center}}
+h1{{color:#1e8bc3;letter-spacing:2px;margin-bottom:8px;font-size:20px}}
+.sub{{color:#4d6a80;font-size:11px;letter-spacing:1px;margin-bottom:24px}}
+.secret-label{{color:#4d6a80;font-size:10px;letter-spacing:2px;margin-bottom:8px}}
+.warn{{background:rgba(231,76,60,.1);border:1px solid rgba(231,76,60,.3);border-radius:4px;
+padding:12px;color:#e74c3c;font-size:11px;margin:16px 0;line-height:1.8}}
+.btn{{display:inline-block;margin-top:20px;padding:12px 24px;background:#0d2a3d;
+border:1px solid #1e8bc3;color:#1e8bc3;border-radius:4px;text-decoration:none;
+font-size:13px;font-weight:600;letter-spacing:1px}}
+.btn:hover{{background:#1e8bc3;color:#fff}}</style></head>
+<body><div class="box">
+<h1>◈ SCLM — ERSTEINRICHTUNG</h1>
+<div class="sub">BESITZ BESTÄTIGT // EINRICHTUNG ABGESCHLOSSEN</div>
+<div class="warn">⚠ Die Ersteinrichtung ist nun abgeschlossen.<br>
+Verwende dein Admin-Secret auf der Startseite unter <strong>Administration</strong>.
+</div>
+<a class="btn" href="/">→ Zur App</a>
+</div></body></html>"""
+        return """<!DOCTYPE html>
+<html lang="de"><head><meta charset="UTF-8"><title>SCLM — Fehler</title>
+<style>body{font-family:monospace;background:#080c10;color:#e8eef4;display:flex;
+align-items:center;justify-content:center;min-height:100vh;margin:0}
+.box{background:#0d1318;border:1px solid rgba(231,76,60,.4);border-radius:8px;padding:40px;text-align:center}
+p{color:#e74c3c;}</style></head><body><div class="box">
+<h1>◈ UNGÜLTIG</h1><p>Admin-Secret stimmt nicht. Zugriff verweigert.</p></div></body></html>""", 403
+    # GET: nur das Nachweis-Formular, KEIN Secret wird angezeigt.
+    return """<!DOCTYPE html>
 <html lang="de">
 <head><meta charset="UTF-8"><title>SCLM — Ersteinrichtung</title>
 <style>
-body{{font-family:monospace;background:#080c10;color:#e8eef4;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}}
-.box{{background:#0d1318;border:1px solid rgba(60,140,200,.4);border-radius:8px;padding:40px;max-width:500px;width:90%;text-align:center}}
+body{{font-family:monospace;background:#080c10;color:#e8eef4;display:flex;align-items:center;
+justify-content:center;min-height:100vh;margin:0}}
+.box{{background:#0d1318;border:1px solid rgba(30,139,195,.4);border-radius:8px;padding:40px;
+max-width:440px;width:90%;text-align:center}}
 h1{{color:#1e8bc3;letter-spacing:2px;margin-bottom:8px;font-size:20px}}
-.sub{{color:#4d6a80;font-size:11px;letter-spacing:1px;margin-bottom:30px}}
-.secret-box{{background:#1a2430;border:1px solid rgba(200,155,60,.4);border-radius:6px;padding:20px;margin:20px 0}}
-.secret-label{{color:#4d6a80;font-size:10px;letter-spacing:2px;margin-bottom:8px}}
-.secret-val{{color:#c89b3c;font-size:24px;letter-spacing:4px;font-weight:700;word-break:break-all}}
-.warn{{background:rgba(231,76,60,.1);border:1px solid rgba(231,76,60,.3);border-radius:4px;padding:12px;color:#e74c3c;font-size:11px;margin:16px 0;line-height:1.8}}
-.info{{background:rgba(30,139,195,.1);border:1px solid rgba(30,139,195,.3);border-radius:4px;padding:12px;color:#7cc4e4;font-size:11px;margin:16px 0;line-height:1.8}}
-.btn{{display:inline-block;margin-top:20px;padding:12px 24px;background:#0d2a3d;border:1px solid #1e8bc3;color:#1e8bc3;border-radius:4px;text-decoration:none;font-size:13px;font-weight:600;letter-spacing:1px}}
+.sub{{color:#4d6a80;font-size:11px;letter-spacing:1px;margin-bottom:24px}}
+.info{{background:rgba(30,139,195,.1);border:1px solid rgba(30,139,195,.3);border-radius:4px;
+padding:12px;color:#7cc4e4;font-size:11px;margin-bottom:20px;line-height:1.8;text-align:left}}
+input{{width:100%;padding:10px;background:#1a2430;border:1px solid rgba(60,140,200,.4);
+border-radius:4px;color:#e8eef4;font-family:monospace;margin-bottom:14px;box-sizing:border-box}}
+.btn{{display:inline-block;padding:12px 24px;background:#0d2a3d;border:1px solid #1e8bc3;
+color:#1e8bc3;border-radius:4px;font-size:13px;font-weight:600;letter-spacing:1px;cursor:pointer}}
 .btn:hover{{background:#1e8bc3;color:#fff}}
 </style></head>
 <body><div class="box">
-<h1>◈ SCLM — Star Citizen Loot Manager</h1>
-<div class="sub">ERSTEINRICHTUNG // EINMALIGE ANZEIGE</div>
-<div class="secret-box">
-  <div class="secret-label">ADMIN SECRET</div>
-  <div class="secret-val">{sec}</div>
-</div>
-<div class="warn">
-  ⚠ Diese Seite wird nur <strong>einmalig</strong> angezeigt und ist danach gesperrt.<br>
-  Notiere das Secret jetzt — du kannst es später in den Container-Logs oder über die<br>
-  Administrationsseite unter Einstellungen ändern.
-</div>
-<div class="info">
-  Nach dem ersten Login empfehlen wir das Secret unter<br>
-  <strong>Administration → Einstellungen → Kennwort ändern</strong> anzupassen.
-</div>
-<a class="btn" href="/#admin?secret={sec}">→ Zur Administrationsseite</a>
+<h1>◈ SCLM — Ersteinrichtung</h1>
+<div class="sub">NUR FÜR DEN SERVER-OPERATOR</div>
+<div class="info"><strong>Besitz bestätigen:</strong> Gib das Admin-Secret ein, das beim
+Serverstart in der Konsole ausgegeben wird (oder via <code>get-secret.sh</code> abrufbar).
+Diese Seite zeigt das Secret <strong>nicht</strong> an — es muss dem Betreiber bereits bekannt sein.</div>
+<form method="POST" action="/setup">
+<input type="password" name="secret" placeholder="Admin-Secret..." autocomplete="off"/>
+<button class="btn">✔ Freischalten</button>
+</form>
 </div></body></html>"""
 
 @app.route("/")
