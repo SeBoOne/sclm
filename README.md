@@ -88,3 +88,29 @@ Dies ist eine inoffizielle Star-Citizen-Fan-Website, nicht verbunden mit der Clo
 ## Lizenz
 
 MIT — siehe [LICENSE](LICENSE)
+
+## Deployment aus Registry (empfohlen für Server)
+
+Das Image wird bei jedem Push auf `main` automatisch von GitHub Actions gebaut und nach GHCR gepusht.
+
+```yaml
+services:
+  sc-loot-raffle:
+    image: ghcr.io/seboone/sclm:latest
+    ports:
+      - "5000:5000"
+    volumes:
+      - sc_loot_data:/data
+    restart: unless-stopped
+
+volumes:
+  sc_loot_data:
+```
+
+Updates einspielen:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+> Wichtig: Beim Umstieg von `build:` auf `image:` den **gleichen Volume-Namen** behalten, sonst ist die Datenbank „weg" (sie liegt dann im alten Volume).
