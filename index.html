@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="de" data-palette="ion">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -42,6 +42,14 @@
         style="width:80px;accent-color:var(--acc);cursor:pointer"
         oninput="setScale(this.value)"/>
       <span style="font-size:13px;color:var(--t2);font-family:monospace;user-select:none">A</span>
+    </div>
+    <div class="pal-sw" title="" id="pal-sw-wrap" style="margin-left:8px;border-left:1px solid var(--bdr);padding-left:12px">
+      <span class="psw-i" aria-hidden="true">◈</span>
+      <select id="palette-select" aria-label="Farbschema" onchange="setPalette(this.value)">
+        <option value="cargo">Cargo</option>
+        <option value="ion">Ion</option>
+        <option value="uplink">Uplink</option>
+      </select>
     </div>
   </div>
 </div>
