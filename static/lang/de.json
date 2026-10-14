@@ -200,5 +200,9 @@
   "pt.logged_in_as": "Eingeloggt als: {name}",
   "pt.wait.identity": "Eingeloggt als: {name}",
   "pa.pcode_tip": "Teilnehmer-Key kopieren (an den Teilnehmer weitergeben)",
-  "pa.pcode_copied": "Teilnehmer-Key von {name} kopiert — gib ihn an den Teilnehmer weiter (er wird beim Auswählen des Namens gebraucht)."
+  "pa.pcode_copied": "Teilnehmer-Key von {name} kopiert — gib ihn an den Teilnehmer weiter (er wird beim Auswählen des Namens gebraucht).",
+  "ui.palette": "Farbschema",
+  "ui.palette.cargo": "Cargo",
+  "ui.palette.ion": "Ion",
+  "ui.palette.uplink": "Uplink"
 }

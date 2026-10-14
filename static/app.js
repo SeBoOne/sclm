@@ -1217,8 +1217,46 @@ function renderWaitSelection(){
 
 // ── i18n integration ──────────────────────────────────────────────────────────
 
+// ── Palette (MFD) ─────────────────────────────────────────────────────────────
+// Dezent in der Einstellungs-Ecke (Header); Auswahl persistiert (sclm_palette).
+const PALS = ['cargo', 'ion', 'uplink'];
+function setPalette(name) {
+  if (PALS.indexOf(name) < 0) name = 'ion';
+  document.documentElement.setAttribute('data-palette', name);
+  try { localStorage.setItem('sclm_palette', name); } catch (_) {}
+  const sel = document.getElementById('palette-select');
+  if (sel) sel.value = name;
+}
+function initPalette() {
+  // URL-Param ?p=... gewinnt (Demo/Deeplink), sonst localStorage, sonst ion.
+  let fromUrl = null;
+  try {
+    const q = new URLSearchParams(location.search).get('p');
+    if (q && PALS.indexOf(q) >= 0) fromUrl = q;
+  } catch (_) {}
+  let saved = null;
+  try { saved = localStorage.getItem('sclm_palette'); } catch (_) {}
+  setPalette(fromUrl || saved || 'ion');
+  const sel = document.getElementById('palette-select');
+  if (sel) {
+    const label = (typeof t === 'function') ? t('ui.palette') : 'Farbschema';
+    sel.setAttribute('aria-label', label);
+    const wrap = document.getElementById('pal-sw-wrap');
+    if (wrap) wrap.setAttribute('title', label);
+    // Option-Labels aus den i18n-Keys (ui.palette.*) einlesen.
+    for (let i = 0; i < sel.options.length; i++) {
+      const v = sel.options[i].value;
+      if (typeof t === 'function' && PALS.indexOf(v) >= 0) {
+        sel.options[i].text = t('ui.palette.' + v);
+      }
+    }
+  }
+}
+
 // Called by i18n.js when user switches language — re-renders active page.
 function onLangChange(lang) {
+  const sel = document.getElementById('palette-select');
+  if (sel) sel.setAttribute('aria-label', t('ui.palette'));
   const pages = {
     'pg-home':  () => { if (typeof loadHome === 'function') loadHome(); },
     'pg-admin': () => {
@@ -1278,6 +1316,7 @@ function tryHandleAdminHash(){
 }
 
 initLang().then(() => {
+  initPalette();
   if (tryHandleAdminHash()) return;   // Admin-Link hat Vorrang vor Nav-State
   const saved = sessionStorage.getItem(SSTATE_KEY);
   if (saved) {
