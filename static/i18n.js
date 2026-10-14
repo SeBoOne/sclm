@@ -97,9 +97,6 @@ async function setLang(lang) {
 
 // ── DOM helpers ───────────────────────────────────────────────────────────────
 
-/** Apply translations to all [data-i18n] and [data-i18n-ph] elements. */
-function applyLangToDOM() { _applyDOM(); }
-
 function _applyDOM() {
   document.querySelectorAll('[data-i18n]').forEach(el => {
     el.textContent = t(el.dataset.i18n);

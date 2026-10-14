@@ -9,11 +9,15 @@ const tog=(id,v)=>v?show(id):hide(id);
 let S=null,myCode="",myPid="",myPName="",myPcode="";
 let selT="item",selG="A",selSz="1",selMw=3;
 let saSelT="item",saSelG="A",saSelSz="1";
-let acTmr=null,pollTmr=null,revTmr=null;
+let acTmr=null,pollTmr=null;
 let superSecret="";
 
 async function api(path,method="GET",body=null){
-  const o={method,headers:{"Content-Type":"application/json"}};
+  const headers={"Content-Type":"application/json"};
+  // M4: Secrets/Codes nur als Header senden — nie in Query/URL (Access-Logs, History, Referer).
+  if(myCode) headers["X-SCLM-Code"]=myCode;
+  if(superSecret) headers["X-SCLM-Secret"]=superSecret;
+  const o={method,headers};
   if(body) o.body=JSON.stringify(body);
   try{const r=await fetch(path,o);return r.json();}catch(e){return{error:"Netzwerkfehler"};}
 }
@@ -114,8 +118,13 @@ async function loadHome(){
   }).join("");
 }
 
-function saveCreatorCode(sid,code){try{const m=JSON.parse(localStorage.getItem("sclm_creator")||"{}");m[sid]=code;localStorage.setItem("sclm_creator",JSON.stringify(m));}catch(e){}}
-function getCreatorCode(sid){try{return(JSON.parse(localStorage.getItem("sclm_creator")||"{}"))[sid]||null;}catch(e){return null;}}
+// M7: Admin-Codes NUR im sessionStorage (per Tab, kein Überleben über den
+// Browser-Neustart) und es wird nur der ZU EINEM ZEITPUNKT AKTIVE Code gehalten —
+// nicht die ganze Map aller erstellten Events. Tradeoff: nach Wechsel auf ein
+// anderes Event ist der "Als Ersteller"-Schnellzugriff für davor erstellte Events
+// im selben Tab nicht mehr verfügbar.
+function saveCreatorCode(sid,code){try{sessionStorage.setItem("sclm_creator",JSON.stringify({sid,code}));}catch(e){}}
+function getCreatorCode(sid){try{const m=JSON.parse(sessionStorage.getItem("sclm_creator")||"{}");return(m&&m.sid===sid)?(m.code||null):null;}catch(e){return null;}}
 function togCreatePanel(){$("create-panel").classList.toggle("H");}
 function sMw(btn){$("mw-grp").querySelectorAll(".tgl").forEach(b=>b.className="tgl");btn.classList.add("st");selMw=+btn.dataset.v;}
 
@@ -365,7 +374,7 @@ function copyPcode(pid){
 }
 async function removeP(pid){
   if(!confirm(t("pt.del_confirm"))) return;
-  await fetch(`/api/session/${S.id}/participants/${pid}?code=${myCode}`,{method:"DELETE"});
+  await api(`/api/session/${S.id}/participants/${pid}`,"DELETE");
   await reloadS();renderAP();updOvStats();
 }
 async function acP(q){
@@ -498,7 +507,7 @@ async function addL(){
   await reloadS();renderAL();updOvStats();
 }
 async function chQty(lid,d){await api(`/api/session/${S.id}/loot/${lid}/qty`,"PATCH",{code:myCode,delta:d});await reloadS();renderAL();updOvStats();}
-async function removeL(lid){await fetch(`/api/session/${S.id}/loot/${lid}?code=${myCode}`,{method:"DELETE"});await reloadS();renderAL();updOvStats();}
+async function removeL(lid){await api(`/api/session/${S.id}/loot/${lid}`,"DELETE");await reloadS();renderAL();updOvStats();}
 async function togSale(lid,fs){
   if(fs&&!confirm(t("confirm.sale"))) return;
   await api(`/api/session/${S.id}/loot/${lid}/sale`,"PATCH",{code:myCode,for_sale:fs});
@@ -568,16 +577,6 @@ function renderCoSum(){
   </div>`;
 }
 
-let revDebTimer=null;
-function saveRevDebounce(){
-  clearTimeout(revDebTimer);
-  revDebTimer=setTimeout(async()=>{
-    const v=$("rev-inp").value;
-    await api(`/api/session/${S.id}/settings`,"PATCH",{code:myCode,total_revenue:v===""?null:parseFloat(v)});
-    await reloadS();renderCoSum();
-  },600);
-}
-
 async function addCom(){
   const name=$("co-nm").value.trim();if(!name) return;
   const scu=parseFloat($("co-scu").value)||0;
@@ -587,7 +586,7 @@ async function addCom(){
 }
 async function chCom(cid,d){await api(`/api/session/${S.id}/commodities/${cid}/qty`,"PATCH",{code:myCode,delta:d});await reloadS();renderAC();}
 async function setCom(cid,val){await api(`/api/session/${S.id}/commodities/${cid}`,"PATCH",{code:myCode,scu:parseFloat(val)||0});await reloadS();renderAC();}
-async function delCom(cid){await fetch(`/api/session/${S.id}/commodities/${cid}?code=${myCode}`,{method:"DELETE"});await reloadS();renderAC();}
+async function delCom(cid){await api(`/api/session/${S.id}/commodities/${cid}`,"DELETE");await reloadS();renderAC();}
 async function acCo(q){
   if(!q){acClose("co-ac");return;}clearTimeout(acTmr);
   acTmr=setTimeout(async()=>{
@@ -829,7 +828,7 @@ function showPtResult(){
 }
 
 async function renderPtResult(){
-  const r=await api(`/api/session/${S.id}/raffle/result_for/${myPid}?code=${myCode}`);
+  const r=await api(`/api/session/${S.id}/raffle/result_for/${myPid}`);
   if(!r.result){$("pt-res-content").innerHTML=`<div class="empty">${t("pt.result.empty2")}</div>`;return;}
   const res=r.result,won=res.won||[];
   if(!won.length){$("pt-res-content").innerHTML=`<div class="empty">${t("pt.result.empty")}</div>`;return;}
@@ -886,7 +885,7 @@ function saTab(t){
 }
 
 async function loadSaEvents(){
-  const list=await api(`/api/sessions?secret=${superSecret}`);
+  const list=await api("/api/sessions");
   const el=$("sa-ev-list");
   if(!list.length){el.innerHTML=`<div class="empty">${t("sa.empty.events")}</div>`;return;}
   el.innerHTML=list.map(s=>`<div class="ir" style="flex-wrap:wrap">
@@ -906,7 +905,7 @@ async function loadSaEvents(){
 
 async function saOpenAdmin(ac){myCode=ac;S=await api(`/api/session/${ac}`);showAdminView();}
 async function saTogLock(sid,ac,locked){await api(`/api/session/${sid}/settings`,"PATCH",{code:ac,locked:!locked,secret:superSecret});loadSaEvents();}
-async function saDelEv(sid){if(!confirm(t("confirm.del_event"))) return;await fetch(`/api/session/${sid}?secret=${superSecret}`,{method:"DELETE"});loadSaEvents();}
+async function saDelEv(sid){if(!confirm(t("confirm.del_event"))) return;await api(`/api/session/${sid}`,"DELETE");loadSaEvents();}
 
 let saItemsRaw=[];
 let saSelCat="item", saSelWSz="1";
@@ -923,7 +922,7 @@ function saSS(btn){$("sa-sz-grp").querySelectorAll(".tgl").forEach(b=>b.classNam
 function saSWSz(btn){$("sa-sw-sz-grp").querySelectorAll(".tgl").forEach(b=>b.className="tgl");saSelWSz=btn.dataset.v;btn.classList.add("ss");}
 
 async function loadSaItems(){
-  const r=await api(`/api/admin/data?secret=${superSecret}`);saItemsRaw=r.items||[];
+  const r=await api("/api/admin/data");saItemsRaw=r.items||[];
   const el=$("sa-it-list");
   if(!saItemsRaw.length){el.innerHTML=`<div class="empty">${t("sa.empty.items")}</div>`;return;}
   el.innerHTML=saItemsRaw.sort((a,b)=>a.name.localeCompare(b.name,"de")).map((i,idx)=>`
@@ -940,7 +939,7 @@ async function saAddItem(){
   else if(saSelCat==="comp"){ typ=saSelT; grade=saSelG; size=saSelSz; }
   const pending=saItemsRaw.find(x=>x._pendingDelete);
   if(pending){
-    await fetch(`/api/admin/items/${encodeURIComponent(pending._pendingDelete)}?secret=${superSecret}`,{method:"DELETE"});
+    await api(`/api/admin/items/${encodeURIComponent(pending._pendingDelete)}`,"DELETE");
     delete pending._pendingDelete;
   }
   await api("/api/admin/items","POST",{secret:superSecret,name,type:typ,grade,size});
@@ -950,7 +949,7 @@ async function saDelItem(idx){
   const item=saItemsRaw[idx]; if(!item) return;
   if(!confirm(t("confirm.del_db_item",{name:item.name}))) return;
   const key=encodeURIComponent(item.loot_key);
-  await fetch(`/api/admin/items/${key}?secret=${superSecret}`,{method:"DELETE"});
+  await api(`/api/admin/items/${key}`,"DELETE");
   loadSaItems();
 }
 
@@ -976,21 +975,21 @@ function saEditItem(idx){
 }
 
 async function loadSaPn(){
-  const r=await api(`/api/admin/data?secret=${superSecret}`);const names=r.participant_names||[];
+  const r=await api("/api/admin/data");const names=r.participant_names||[];
   const el=$("sa-pn-list");
   if(!names.length){el.innerHTML=`<div class="empty">${t("sa.empty.names")}</div>`;return;}
   el.innerHTML=names.map(n=>`<div class="ir"><div class="in f1">${esc(n)}</div><button class="btn btn-xs btn-red" onclick="saDelPN('${encodeURIComponent(n)}')">✕</button></div>`).join("");
 }
 async function saAddPN(){const name=$("sa-pn-inp").value.trim();if(!name) return;await api("/api/admin/participants","POST",{secret:superSecret,name});$("sa-pn-inp").value="";loadSaPn();}
-async function saDelPN(n){await fetch(`/api/admin/participants/${n}?secret=${superSecret}`,{method:"DELETE"});loadSaPn();}
+async function saDelPN(n){await api(`/api/admin/participants/${n}`,"DELETE");loadSaPn();}
 
 async function loadSaCo(){
-  const r=await api(`/api/admin/data?secret=${superSecret}`);const names=r.commodity_names||[];
+  const r=await api("/api/admin/data");const names=r.commodity_names||[];
   const el=$("sa-co-list");
   if(!names.length){el.innerHTML=`<div class="empty">${t("sa.empty.commodities")}</div>`;return;}
   el.innerHTML=names.map(n=>`<div class="ir"><div class="in f1">${esc(n)}</div><button class="btn btn-xs btn-red" onclick="saDelCo('${encodeURIComponent(n)}')">✕</button></div>`).join("");
 }
-async function saDelCo(n){await fetch(`/api/admin/commodities/${n}?secret=${superSecret}`,{method:"DELETE"});loadSaCo();}
+async function saDelCo(n){await api(`/api/admin/commodities/${n}`,"DELETE");loadSaCo();}
 
 async function runUex(){
   const btn=$("uex-btn"),res=$("uex-result");
@@ -1127,10 +1126,9 @@ async function changePw(){
   const r=await api("/api/admin/change_secret","POST",{secret:cur,new_secret:nw});
   if(r.error){res.innerHTML=`<div class="alert a-err">${esc(r.error)}</div>`;return;}
   superSecret=nw;
-  // Update URL hash with new secret
-  history.replaceState(null,"",`#admin?secret=${encodeURIComponent(nw)}`);
+  // M4: Secret NIE wieder in die URL schreiben. Nur im JS-Speicher halten.
   $("pw-current").value="";$("pw-new").value="";$("pw-repeat").value="";
-  res.innerHTML='<div class="alert a-ok">✓ Kennwort erfolgreich geändert. Neue Admin-URL wurde aktualisiert.</div>';
+  res.innerHTML='<div class="alert a-ok">✓ Kennwort erfolgreich geändert.</div>';
 }
 
 // ── About ────────────────────────────────────────────────────────────────────
@@ -1264,7 +1262,23 @@ function onLangChange(lang) {
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 // i18n.js must be loaded before app.js. initLang() returns a Promise.
+
+// M4: Ein eingehender Admin-Link der Form #admin?secret=... wird beim Start
+// ausgewertet und das Secret SOFORT aus der URL entfernt (history.replaceState),
+// damit es nie in Browser-History/Referer bleibt. Gehalten wird es nur im
+// JS-Speicher (superSecret).
+function tryHandleAdminHash(){
+  const m=location.hash.match(/^#admin\?secret=([^&]+)/);
+  if(!m) return false;
+  const sec=decodeURIComponent(m[1]);
+  history.replaceState(null,"",location.pathname+location.search);
+  superSecret=sec;
+  loadSuperAdmin();
+  return true;
+}
+
 initLang().then(() => {
+  if (tryHandleAdminHash()) return;   // Admin-Link hat Vorrang vor Nav-State
   const saved = sessionStorage.getItem(SSTATE_KEY);
   if (saved) {
     try {
