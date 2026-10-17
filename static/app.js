@@ -1102,10 +1102,24 @@ function acRender(dropId,items,onSel){
   if(!items.length){d.classList.remove("open");return;}
   d.innerHTML=items.map(n=>`<div class="aci">${esc(n)}</div>`).join("");
   d.classList.add("open");
+  // Portal: Dropdown an body heben (position:fixed unter dem Input), sonst clippt
+  // clip-path der .card (MFD-Schrägen) die Vorschlagsliste an der Kartengrenze.
+  if(d.parentElement!==document.body){
+    const inp=d.closest(".acw")?.querySelector("input");
+    d._anchor=inp||null;
+    document.body.appendChild(d);
+  }
+  if(d._anchor){
+    const r=d._anchor.getBoundingClientRect();
+    d.style.left=r.left+"px";
+    d.style.top=(r.bottom+2)+"px";
+    d.style.width=r.width+"px";
+  }
   d.querySelectorAll(".aci").forEach((el,i)=>el.addEventListener("mousedown",e=>{e.preventDefault();onSel(items[i]);}));
 }
 function acClose(id){const d=$(id);if(d)d.classList.remove("open");}
-document.addEventListener("click",e=>{if(!e.target.closest(".acw"))["p-ac","l-ac","pt-nm-ac","co-ac"].forEach(acClose);});
+document.addEventListener("click",e=>{if(!e.target.closest(".acd")&&!e.target.closest(".acw"))["p-ac","l-ac","pt-nm-ac","co-ac"].forEach(acClose);});
+window.addEventListener("scroll",()=>["p-ac","l-ac","pt-nm-ac","co-ac"].forEach(acClose),true);
 
 // ── session persistence ──────────────────────────────────────────────────────
 const SSTATE_KEY="scr_session_state";

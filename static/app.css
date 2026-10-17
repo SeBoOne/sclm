@@ -190,7 +190,7 @@ label{font-size:9px;color:var(--acc);font-family:ui-monospace,monospace;letter-s
 
 /* ---- Autocomplete ---- */
 .acw{position:relative}
-.acd{position:absolute;top:100%;left:0;right:0;background:var(--bg3);border:1px solid var(--bdr2);border-top:none;
+.acd{position:fixed;background:var(--bg3);border:1px solid var(--bdr2);border-top:none;
   border-radius:0 0 var(--r) var(--r);z-index:500;max-height:180px;overflow-y:auto;display:none}
 .acd.open{display:block}
 .aci{padding:6px 9px;cursor:pointer;font-size:13px;display:flex;align-items:center;gap:6px}
