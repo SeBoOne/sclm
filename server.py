@@ -334,7 +334,7 @@ def list_sessions():
     is_super = secure_eq(secret, get_admin_secret())
     with get_db() as con:
         rows = rows_to_list(con.execute(
-            "SELECT id,name,created,join_code,admin_code,locked,raffle_locked,commodities_locked,raffle_done,total_revenue,image_url FROM sessions ORDER BY created DESC").fetchall())
+            "SELECT id,name,created,join_code,admin_code,locked,raffle_locked,commodities_locked,raffle_done,total_revenue,image_url FROM sessions ORDER BY substr(created,7,4) DESC, substr(created,4,2) DESC, substr(created,1,2) DESC").fetchall())
     result = []
     for s in rows:
         with get_db() as con:
