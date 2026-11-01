@@ -2,6 +2,10 @@
 
 Star Citizen Loot-Verlosungs-Tool für Gruppen.
 
+## Anleitung
+
+Eine Anleitung für Ersteller und Teilnehmer (gesamter Ablauf, alle Funktionen): [docs/ANLEITUNG.md](docs/ANLEITUNG.md)
+
 ## Docker (empfohlen)
 
 **Voraussetzung:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) installieren.
