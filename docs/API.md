@@ -615,10 +615,15 @@ Rate-Limits gesamt: `raffle` 20/60 s, `verify` 30/60 s, `change_secret` 10/60 s.
 | 400 | `total_revenue muss eine Zahl sein` / `darf nicht negativ sein` | Settings |
 | 400 | `sale_revenue muss eine Zahl sein` / `darf nicht negativ sein` | Loot-Sale |
 | 400 | `scu muss eine Zahl sein` / `darf nicht negativ sein` | Waren |
-| 400 | `delta muss eine Ganzzahl sein` | Loot-Menge (Float akzeptiert bei Waren) |
+| 400 | `scu muss eine Zahl sein` / `scu darf nicht negativ sein` | Waren (POST/PATCH) |
+| 400 | `total_revenue muss eine Zahl sein` / `total_revenue darf nicht negativ sein` | Settings |
+| 400 | `sale_revenue muss eine Zahl sein` / `sale_revenue darf nicht negativ sein` | Loot-Verkauf |
+| 400 | `delta muss eine Ganzzahl sein` | Loot-Menge (Int) |
+| 400 | `delta muss eine Zahl sein` | Waren-Menge (SCU, Float erlaubt) |
 | 400 | `qty muss eine Ganzzahl sein` | Loot |
-| 400 | `loot_ids muss eine Liste sein` | Array-Typ zwingend (JSON-String reicht nicht) |
+| 400 | `Keine Daten empfangen` | `uex_import` mit leerer `items`-Liste |
 | 400 | `participant_id erforderlich` | Wünsche ohne ID |
+| 400 | `loot_ids muss eine Liste sein` | Array-Typ zwingend (JSON-String reicht nicht) |
 | 400 | `Ungültiges Loot-Item für diese Session` | loot_id aus anderer Session |
 | 400 | `Maximal N Wünsche erlaubt` | nur Join-Code-Pfad, > `max_wishes` |
 | 400 | `Braucht Teilnehmer und Loot` | Ziehung ohne Teilnehmer oder nicht-verkauftes Loot |
@@ -630,6 +635,8 @@ Rate-Limits gesamt: `raffle` 20/60 s, `verify` 30/60 s, `change_secret` 10/60 s.
 | 403 | `Nur ein Administrator kann entsperren` | `locked:false` ohne Site-Admin |
 | 403 | `Session gesperrt` | `locked` blockiert Aktion (`regenerate_codes` ausgenommen Site-Admin) |
 | 403 | `Aktuelles Kennwort falsch` | `change_secret` ohne korrektes altes Secret |
+| 403 | `Ungültiges Kennwort` | `POST /api/admin/verify` mit falschem Secret |
+| 400 | `Kennwort muss mindestens 8 Zeichen haben` | `change_secret` mit zu kurzem neue Secret |
 | 403 | `Nur lokal erreichbar` | `secret-hint` von extern |
 | 404 | `Nicht gefunden` | unbekannte Session-ID |
 | 404 | `Code ungültig` | `GET /api/session/<code>` mit falschem Code |
