@@ -127,6 +127,9 @@ Wunsch zustande kam). Zwei Buttons:
 - **Mobil:** Alle Ansichten sind responsive; Anmeldung und Wunsch-Auswahl
   funktionieren problemlos vom Handy.
 
+> **Für Techniker / eigene Tools:** Die vollständige API-Referenz (Auth-Regeln, alle
+> Endpunkte, Fehlerkatalog, Szenario-Beispiele) liegt in [API.md](API.md).
+
 ## D. Häufige Fragen
 
 **Ich habe meinen Admin-Code verloren.**

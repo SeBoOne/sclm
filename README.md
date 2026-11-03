@@ -4,7 +4,9 @@ Star Citizen Loot-Verlosungs-Tool für Gruppen.
 
 ## Anleitung
 
-Eine Anleitung für Ersteller und Teilnehmer (gesamter Ablauf, alle Funktionen): [docs/ANLEITUNG.md](docs/ANLEITUNG.md)
+- **Anleitung** für Ersteller und Teilnehmer (Ablauf, alle Funktionen): [docs/ANLEITUNG.md](docs/ANLEITUNG.md)
+- **API-Referenz** (vollständig, inkl. Auth-/pcode-Regeln, Fehlerkatalog, Szenario-Rezepte —
+  für eigene Tools/Bots gedacht): [docs/API.md](docs/API.md)
 
 ## Docker (empfohlen)
 
