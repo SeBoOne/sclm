@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """SCLM — Web Server. Start: python server.py"""
-import sqlite3, os, json, random, string, re, sys, secrets, time, threading, functools, urllib.request, hmac
+import sqlite3, os, json, random, string, re, sys, secrets, time, threading, functools, urllib.request, hmac, math
 from collections import deque
 from pathlib import Path
 from datetime import datetime
@@ -14,6 +14,13 @@ _data_dir.mkdir(parents=True, exist_ok=True)
 DB = _data_dir / "data.db"
 # Nur static/ + index.html werden ausgeliefert — NIEMALS der App-Root.
 app = Flask(__name__, static_folder=str(BASE / "static"))
+
+# ── API-Härtung 3A: Zahlengrenzen (leicht anpassbar) ─────────────────────────
+QTY_MIN, QTY_MAX = 1, 100_000
+DELTA_MIN, DELTA_MAX = -100_000, 100_000
+SCU_MIN, SCU_MAX = 0, 1_000_000_000
+REVENUE_MIN, REVENUE_MAX = 0, 1_000_000_000_000
+SAFE_ABS_MAX = 1e15            # Serialisierung: Beträge über 1e15 werden zu null
 
 def get_db():
     con = sqlite3.connect(DB)
@@ -186,7 +193,9 @@ def code6():
         with get_db() as con:
             if not con.execute("SELECT 1 FROM sessions WHERE admin_code=? OR join_code=?",(c,c)).fetchone():
                 return c
-def loot_key(name,typ,grade,size): return "|".join([name.lower().strip(),typ or "",grade or "",size or ""])
+def loot_key(name,typ,grade,size):
+    def _s(v): return v if isinstance(v, str) else ("" if v is None else str(v))
+    return "|".join([name.lower().strip(),_s(typ),_s(grade),_s(size)])
 def row_to_dict(r): return dict(r) if r else None
 def rows_to_list(r): return [dict(x) for x in r]
 def is_admin(s,code): return bool(s) and secure_eq(s.get("admin_code"), (code or "").upper())
@@ -252,6 +261,91 @@ def is_intlike(v):
     except (TypeError, ValueError):
         return False
 
+# ── API-Härtung 3A: zentrale Typ-/Grenzvalidierung ───────────────────────────
+# Vertrag:
+#  - Textfelder (name, type, grade, size, added_by, ...): Zeichenkette oder null.
+#    Zahlen/Booleans/Listen/Objekte -> 400 "<Feld> muss eine Zeichenkette sein".
+#  - Numerische Felder (qty, scu, delta, sale_revenue, total_revenue, max_wishes):
+#    JSON-Zahl oder numerische Saite ("3" -> 3). Bool/Liste/nicht-numerische Saite
+#    -> 400 "<Feld> muss eine Zahl sein". NaN/Inf -> 400 "... darf nicht NaN oder
+#    unendlich sein".
+_INT_RE = re.compile(r"[+-]?\d+")
+
+def _num(v, key, integer=False):
+    """-> (value|None, err|None). Booleans werden als Zahl abgelehnt."""
+    if v is None:
+        return None, None
+    if isinstance(v, bool):
+        return None, f"{key} muss eine Zahl sein"
+    if isinstance(v, str):
+        if integer:
+            if not _INT_RE.fullmatch(v.strip()):
+                return None, f"{key} muss eine Zahl sein"
+            v = int(v.strip())
+        else:
+            try:
+                v = float(v)
+            except ValueError:
+                return None, f"{key} muss eine Zahl sein"
+    if isinstance(v, (int, float)):
+        try:
+            out = int(v) if integer else float(v)
+        except (OverflowError, ValueError):
+            return None, f"{key} darf nicht NaN oder unendlich sein"
+        if not math.isfinite(out):
+            return None, f"{key} darf nicht NaN oder unendlich sein"
+        return out, None
+    return None, f"{key} muss eine Zahl sein"
+
+def _range_err(v, key, lo, hi, integer=False):
+    if v < lo or v > hi:
+        a, b = (int(lo), int(hi)) if integer else (lo, hi)
+        return jsonify({"error": f"{key} muss zwischen {a} und {b} sein"}), 400
+    return None
+
+def _text_val(payload, key):
+    """-> (value|None, err_json|None). Falscher Typ -> 400-Flask-Antworttuple."""
+    if key not in payload:
+        return None, None
+    v = payload[key]
+    if v is None:
+        return None, None
+    if isinstance(v, str):
+        return v, None
+    return None, (jsonify({"error": f"{key} muss eine Zeichenkette sein"}), 400)
+
+def _num_val(payload, key, integer=False, lo=None, hi=None, default=None):
+    """-> (value|None, err_json|None). Falscher Typ/Grenze -> 400-Antworttuple.
+    Fehlender oder null-Wert -> (default, None)."""
+    if key not in payload:
+        return default, None
+    v, err = _num(payload[key], key, integer=integer)
+    if err:
+        return None, (jsonify({"error": err}), 400)
+    if v is None:
+        return default, None
+    if lo is not None or hi is not None:
+        r = _range_err(v, key, lo, hi, integer=integer)
+        if r:
+            return None, r
+    return v, None
+
+def _safe_num(v):
+    """Robuste Serialisierung: nicht-endlich oder |wert| > SAFE_ABS_MAX -> null."""
+    if v is None or isinstance(v, bool):
+        return None
+    if not isinstance(v, (int, float)):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return None
+    if not math.isfinite(v) or abs(v) > SAFE_ABS_MAX:
+        return None
+    return v
+
+def _api_path():
+    return request.path.startswith("/api/")
+
 def load_session(sid_or_code, by_code=False):
     with get_db() as con:
         if by_code:
@@ -266,6 +360,8 @@ def load_session(sid_or_code, by_code=False):
         s["loot"] = rows_to_list(con.execute(
             "SELECT * FROM loot WHERE session_id=? ORDER BY name COLLATE NOCASE",(s["id"],)).fetchall())
         for l in s["loot"]:
+            l["qty"] = _safe_num(l["qty"])
+            l["sale_revenue"] = _safe_num(l["sale_revenue"])
             l["wish_count"] = con.execute(
                 "SELECT COUNT(*) FROM wishes w JOIN loot l2 ON w.loot_id=l2.id "
                 "WHERE l2.session_id=? AND w.loot_id=?",(s["id"],l["id"])).fetchone()[0]
@@ -274,19 +370,29 @@ def load_session(sid_or_code, by_code=False):
                 "SELECT loot_id FROM wishes WHERE participant_id=?",(p["id"],)).fetchall()]
             p["no_interest"] = [r["loot_id"] for r in con.execute(
                 "SELECT loot_id FROM no_interest WHERE participant_id=?",(p["id"],)).fetchall()]
+            # Härtung 3A (additiv): Zählerfelder, bestehende Felder unverändert
+            p["wish_count"] = len(p["wishes"])
+            p["no_interest_count"] = 1 if p["no_interest"] else 0
         s["commodities"] = rows_to_list(con.execute(
             "SELECT * FROM commodities WHERE session_id=? ORDER BY name COLLATE NOCASE",(s["id"],)).fetchall())
+        for c in s["commodities"]:
+            c["scu"] = _safe_num(c["scu"])
         if s["raffle_done"]:
             results = rows_to_list(con.execute(
-                "SELECT * FROM raffle_results WHERE session_id=?",(s["id"],)).fetchall())
-            for r in results: r["won"]=json.loads(r["won_json"])
+                "SELECT * FROM raffle_results WHERE session_id=?", (s["id"],)).fetchall())
+            for r in results:
+                r["won"] = json.loads(r["won_json"])
+                r.pop("won_json", None)
+                # Härtung 3A (additiv)
+                r["won_count"] = len(r["won"])
             s["results"] = results
         else:
             s["results"] = []
-        # totals
-        total_scu = sum(c["scu"] for c in s["commodities"])
-        sale_rev  = sum((l["sale_revenue"] or 0) for l in s["loot"] if l.get("for_sale") and l.get("sale_revenue"))
-        base_rev  = s.get("total_revenue") or 0
+        # totals (Ausreißer in Altbeständen dürfen die Listenabfrage nicht lahmlegen)
+        total_scu = sum(_safe_num(c["scu"]) or 0 for c in s["commodities"])
+        sale_rev  = sum((_safe_num(l["sale_revenue"]) or 0) for l in s["loot"] if l.get("for_sale") and l.get("sale_revenue"))
+        base_rev  = _safe_num(s.get("total_revenue")) or 0
+        s["total_revenue"] = _safe_num(s.get("total_revenue"))
         s["commodity_summary"] = {
             "total_scu": total_scu,
             "total_revenue": (base_rev + sale_rev) if (base_rev or sale_rev) else None,
@@ -294,7 +400,7 @@ def load_session(sid_or_code, by_code=False):
             "count": len(s["commodities"])
         }
         # raffle mode: 'wish' or 'no_interest'
-        total_items = sum(l["qty"] for l in s["loot"] if not l.get("for_sale"))
+        total_items = sum(_safe_num(l["qty"]) or 0 for l in s["loot"] if not l.get("for_sale"))
         s["raffle_mode"] = "no_interest" if total_items < len(s["participants"]) else "wish"
         s["raffle_locked"] = bool(s.get("raffle_locked", 0))
         s["commodities_locked"] = bool(s.get("commodities_locked", 0))
@@ -319,10 +425,10 @@ def aggregate_stats():
         session_count = con.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         participant_count = con.execute("SELECT COUNT(DISTINCT name) FROM participants").fetchone()[0]
     return jsonify({
-        "total_loot": total_loot,
-        "total_loot_raffled": total_loot_raffled,
-        "total_scu": total_scu,
-        "total_revenue": (total_revenue_wars or 0) + (total_revenue_sale or 0),
+        "total_loot": _safe_num(total_loot) or 0,
+        "total_loot_raffled": _safe_num(total_loot_raffled) or 0,
+        "total_scu": _safe_num(total_scu) or 0,
+        "total_revenue": (_safe_num(total_revenue_wars) or 0) + (_safe_num(total_revenue_sale) or 0),
         "session_count": session_count,
         "participant_count": participant_count,
     })
@@ -342,8 +448,8 @@ def list_sessions():
             lc = con.execute("SELECT COALESCE(SUM(qty),0) FROM loot WHERE session_id=? AND for_sale=0",(s["id"],)).fetchone()[0]
             comm = rows_to_list(con.execute("SELECT scu FROM commodities WHERE session_id=?",(s["id"],)).fetchall())
             sale = con.execute("SELECT COALESCE(SUM(sale_revenue),0) FROM loot WHERE session_id=? AND for_sale=1",(s["id"],)).fetchone()[0]
-        total_scu = sum(c["scu"] for c in comm)
-        total_rev = (s["total_revenue"] or 0) + (sale or 0)
+        total_scu = _safe_num(sum(_safe_num(c["scu"]) or 0 for c in comm))
+        total_rev = _safe_num((s["total_revenue"] or 0) + (sale or 0))
         result.append({
             "id":s["id"],"name":s["name"],"created":s["created"],
             "join_code":s["join_code"],
@@ -361,11 +467,9 @@ def create_session():
     data=request.json or {}; name=(data.get("name") or "").strip()
     if not name: return jsonify({"error":"Name erforderlich"}),400
     if len(name) > 200: return jsonify({"error":"Name zu lang"}),400
-    mw = data.get("max_wishes", 3)
-    try:
-        max_wishes = int(mw)
-    except (TypeError, ValueError):
-        return jsonify({"error":"max_wishes muss eine Ganzzahl sein"}),400
+    max_wishes, err = _num_val(data, "max_wishes", integer=True, default=3)
+    if err: return err
+    if max_wishes is None: max_wishes = 3
     if not (1 <= max_wishes <= 10):
         return jsonify({"error":"max_wishes muss zwischen 1 und 10 liegen"}),400
     sid=uid(); ac=code6(); jc=code6()
@@ -377,6 +481,10 @@ def create_session():
 
 @app.route("/api/session/<code>")
 def get_session(code):
+    # Härtung 3A: sid im GET-Pfad ist nicht erlaubt (Codes sind der Vertrag).
+    with get_db() as con:
+        if con.execute("SELECT 1 FROM sessions WHERE id=?",(code,)).fetchone():
+            return jsonify({"error":"sid im Pfad nicht erlaubt: GET /api/session/<admin_code oder join_code> verwenden"}), 404
     s=load_session(code,by_code=True)
     if not s: return jsonify({"error":"Code ungültig"}),404
     admin=is_admin(s,code)
@@ -399,8 +507,9 @@ def update_settings(sid):
         return jsonify({"error":"Nicht autorisiert"}),403
     with get_db() as con:
         if "max_wishes" in data:
-            try: mw=int(data["max_wishes"])
-            except (TypeError, ValueError): return jsonify({"error":"max_wishes muss eine Ganzzahl sein"}),400
+            mw, err = _num_val(data, "max_wishes", integer=True)
+            if err: return err
+            if mw is None: mw = s["max_wishes"]
             if not (1<=mw<=10): return jsonify({"error":"max_wishes muss zwischen 1 und 10 liegen"}),400
             con.execute("UPDATE sessions SET max_wishes=? WHERE id=?",(mw,sid))
         if "locked" in data:
@@ -411,18 +520,23 @@ def update_settings(sid):
             else:
                 return jsonify({"error":"Nur ein Administrator kann entsperren"}),403
         if "name" in data:
-            nm=(data["name"] or "").strip()
+            nm, err = _text_val(data, "name")
+            if err: return err
+            nm = (nm or "").strip()
             if not nm: return jsonify({"error":"Name erforderlich"}),400
             if len(nm) > 200: return jsonify({"error":"Name zu lang"}),400
             con.execute("UPDATE sessions SET name=? WHERE id=?",(nm,sid))
         if "total_revenue" in data:
-            rv=data["total_revenue"]
+            rv = data["total_revenue"]
             if rv in (None,""):
                 con.execute("UPDATE sessions SET total_revenue=NULL WHERE id=?",(sid,))
             else:
-                try: rv=float(rv)
-                except (TypeError, ValueError): return jsonify({"error":"total_revenue muss eine Zahl sein"}),400
-                if rv < 0: return jsonify({"error":"total_revenue darf nicht negativ sein"}),400
+                rv, err = _num_val(data, "total_revenue")
+                if err: return err
+                if rv is None: rv = 0.0
+                if rv < REVENUE_MIN: return jsonify({"error":"total_revenue darf nicht negativ sein"}),400
+                if rv > REVENUE_MAX:
+                    return jsonify({"error": f"total_revenue muss zwischen {REVENUE_MIN} und {REVENUE_MAX} sein"}),400
                 con.execute("UPDATE sessions SET total_revenue=? WHERE id=?",(rv,sid))
         if "image_url" in data:
             con.execute("UPDATE sessions SET image_url=? WHERE id=?",(sanitize_image_url(data["image_url"]),sid))
@@ -459,7 +573,9 @@ def delete_session(sid):
 @app.route("/api/session/<sid>/participants", methods=["POST"])
 def add_participant(sid):
     data=request.json or {}; code=_code_candidates()
-    name=(data.get("name") or "").strip()
+    name, err = _text_val(data, "name")
+    if err: return err
+    name=(name or "").strip()
     if not name: return jsonify({"error":"Name erforderlich"}),400
     if len(name) > 120: return jsonify({"error":"Name zu lang"}),400
     s=load_session(sid)
@@ -496,7 +612,9 @@ def update_participant(sid,pid):
     s=load_session(sid)
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
-    name=(data.get("name") or "").strip()
+    name, err = _text_val(data, "name")
+    if err: return err
+    name=(name or "").strip()
     if name:
         with get_db() as con:
             con.execute("UPDATE participants SET name=? WHERE id=? AND session_id=?",(name,pid,sid))
@@ -509,14 +627,20 @@ def add_loot(sid):
     s=load_session(sid)
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
-    name=(data.get("name") or "").strip()
+    name, err = _text_val(data, "name")
+    if err: return err
+    name=(name or "").strip()
     if not name: return jsonify({"error":"Name erforderlich"}),400
     if len(name) > 120: return jsonify({"error":"Name zu lang"}),400
-    try: qty=int(data.get("qty",1))
-    except (TypeError, ValueError): return jsonify({"error":"qty muss eine Ganzzahl sein"}),400
-    qty=max(1,qty)
-    typ=data.get("type") or None
-    grade=data.get("grade") or None; size=data.get("size") or None
+    qty, err = _num_val(data, "qty", integer=True, lo=QTY_MIN, hi=QTY_MAX, default=1)
+    if err: return err
+    if qty is None: qty = 1
+    typ, err = _text_val(data, "type")
+    if err: return err
+    grade, err = _text_val(data, "grade")
+    if err: return err
+    size, err = _text_val(data, "size")
+    if err: return err
     key=loot_key(name,typ,grade,size)
     with get_db() as con:
         ex=con.execute("SELECT id FROM loot WHERE session_id=? AND loot_key=?",(sid,key)).fetchone()
@@ -547,8 +671,9 @@ def update_loot_qty(sid,lid):
     s=load_session(sid)
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
-    try: delta=int(data.get("delta",0))
-    except (TypeError, ValueError): return jsonify({"error":"delta muss eine Ganzzahl sein"}),400
+    delta, err = _num_val(data, "delta", integer=True, lo=DELTA_MIN, hi=DELTA_MAX, default=0)
+    if err: return err
+    if delta is None: delta = 0
     with get_db() as con:
         con.execute("UPDATE loot SET qty=MAX(1,qty+?) WHERE id=? AND session_id=?",(delta,lid,sid))
     return jsonify({"ok":True})
@@ -571,9 +696,12 @@ def update_loot_sale(sid,lid):
             if rv in (None,""):
                 con.execute("UPDATE loot SET sale_revenue=NULL WHERE id=? AND session_id=?",(lid,sid))
             else:
-                try: rv=float(rv)
-                except (TypeError, ValueError): return jsonify({"error":"sale_revenue muss eine Zahl sein"}),400
-                if rv < 0: return jsonify({"error":"sale_revenue darf nicht negativ sein"}),400
+                rv, err = _num_val(data, "sale_revenue")
+                if err: return err
+                if rv is None: rv = 0.0
+                if rv < REVENUE_MIN: return jsonify({"error":"sale_revenue darf nicht negativ sein"}),400
+                if rv > REVENUE_MAX:
+                    return jsonify({"error": f"sale_revenue muss zwischen {REVENUE_MIN} und {REVENUE_MAX} sein"}),400
                 con.execute("UPDATE loot SET sale_revenue=? WHERE id=? AND session_id=?",(rv,lid,sid))
     return jsonify({"ok":True})
 
@@ -620,6 +748,13 @@ def set_wishes(sid):
         for lid in lids:
             if lid not in valid:
                 return jsonify({"error":"Ungültiges Loot-Item für diese Session"}),400
+        # Härtung 3A: Wuensche auf for_sale-Items ablehnen (no_interest bleibt unberuehrt)
+        if mode=="wish" and lids:
+            marked=[r["id"] for r in con.execute(
+                "SELECT id FROM loot WHERE session_id=? AND for_sale=1 AND id IN (%s)"
+                % ",".join("?"*len(lids)), (sid,*lids)).fetchall()]
+            if marked:
+                return jsonify({"error":"Gegenstand ist für Verkauf markiert","loot_ids":marked}),400
         if mode=="no_interest":
             con.execute("DELETE FROM no_interest WHERE participant_id=? AND session_id=?",(pid,sid))
             for lid in lids:
@@ -639,12 +774,14 @@ def add_commodity(sid):
     s=load_session(sid)
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
-    name=(data.get("name") or "").strip()
+    name, err = _text_val(data, "name")
+    if err: return err
+    name=(name or "").strip()
     if not name: return jsonify({"error":"Name erforderlich"}),400
     if len(name) > 120: return jsonify({"error":"Name zu lang"}),400
-    try: scu=float(data.get("scu",0) or 0)
-    except (TypeError, ValueError): return jsonify({"error":"scu muss eine Zahl sein"}),400
-    if scu < 0: return jsonify({"error":"scu darf nicht negativ sein"}),400
+    scu, err = _num_val(data, "scu", lo=SCU_MIN, hi=SCU_MAX, default=0.0)
+    if err: return err
+    if scu is None: scu = 0.0
     with get_db() as con:
         ex=con.execute("SELECT id FROM commodities WHERE session_id=? AND lower(name)=lower(?)",(sid,name)).fetchone()
         if ex:
@@ -663,11 +800,20 @@ def update_commodity(sid,cid):
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
     with get_db() as con:
         if "scu"  in data:
-            try: scu=float(data["scu"] or 0)
-            except (TypeError, ValueError): return jsonify({"error":"scu muss eine Zahl sein"}),400
-            if scu < 0: return jsonify({"error":"scu darf nicht negativ sein"}),400
+            if data["scu"] in (None,""):
+                scu = 0.0
+            else:
+                scu, err = _num_val(data, "scu")
+                if err: return err
+                if scu is None: scu = 0.0
+                if scu < SCU_MIN: return jsonify({"error":"scu darf nicht negativ sein"}),400
+                if scu > SCU_MAX:
+                    return jsonify({"error": f"scu muss zwischen {SCU_MIN} und {SCU_MAX} sein"}),400
             con.execute("UPDATE commodities SET scu=? WHERE id=? AND session_id=?",(scu,cid,sid))
-        if "name" in data: con.execute("UPDATE commodities SET name=? WHERE id=? AND session_id=?",((data["name"] or "").strip(),cid,sid))
+        if "name" in data:
+            nm, err = _text_val(data, "name")
+            if err: return err
+            con.execute("UPDATE commodities SET name=? WHERE id=? AND session_id=?",((nm or "").strip(),cid,sid))
     return jsonify({"ok":True})
 
 @app.route("/api/session/<sid>/commodities/<cid>/qty", methods=["PATCH"])
@@ -676,8 +822,9 @@ def update_commodity_qty(sid,cid):
     s=load_session(sid)
     if not s or not is_admin(s,code): return jsonify({"error":"Nicht autorisiert"}),403
     if s["locked"]: return jsonify({"error":"Session gesperrt"}),403
-    try: delta=float(data.get("delta",0) or 0)
-    except (TypeError, ValueError): return jsonify({"error":"delta muss eine Zahl sein"}),400
+    delta, err = _num_val(data, "delta", lo=DELTA_MIN, hi=DELTA_MAX, default=0.0)
+    if err: return err
+    if delta is None: delta = 0.0
     with get_db() as con:
         con.execute("UPDATE commodities SET scu=MAX(0,scu+?) WHERE id=? AND session_id=?",(delta,cid,sid))
     return jsonify({"ok":True})
@@ -704,15 +851,17 @@ def run_raffle(sid):
     if not participants or not loot_items: return jsonify({"error":"Braucht Teilnehmer und Loot"}),400
 
     n_parts=len(participants)
-    total_items=sum(l["qty"] for l in loot_items)
+    total_items=sum(_safe_num(l["qty"]) or 0 for l in loot_items)
     mode = "no_interest" if total_items < n_parts else "wish"
 
     parts=[{**p,"won":[],"won_by_wish":False} for p in participants]
 
-    # Expand instances
+    # Expand instances (qty-Ausreißer aus Altbeständen werden auf QTY_MAX gekappt)
     instances=[]
     for l in loot_items:
-        for i in range(l["qty"]): instances.append({**l,"inst":i})
+        q = _safe_num(l["qty"])
+        if q is None or q < 1: continue
+        for i in range(min(int(q), QTY_MAX)): instances.append({**l,"inst":i})
 
     assigned=set()
 
@@ -874,11 +1023,18 @@ def admin_delete_item(key):
 
 @app.route("/api/admin/items", methods=["POST"])
 def admin_add_item():
-    d=request.json
+    d=request.json or {}
     if not secure_eq(_secret_candidates(), get_admin_secret()): return jsonify({"error":"Nicht autorisiert"}),403
-    name=(d.get("name") or "").strip()
+    name, err = _text_val(d, "name")
+    if err: return err
+    name=(name or "").strip()
     if not name: return jsonify({"error":"Name erforderlich"}),400
-    typ=d.get("type") or None; grade=d.get("grade") or None; size=d.get("size") or None
+    typ, err = _text_val(d, "type")
+    if err: return err
+    grade, err = _text_val(d, "grade")
+    if err: return err
+    size, err = _text_val(d, "size")
+    if err: return err
     key=loot_key(name,typ,grade,size)
     with get_db() as con:
         con.execute("INSERT OR REPLACE INTO item_db(loot_key,name,type,grade,size) VALUES(?,?,?,?,?)",(key,name,typ,grade,size))
@@ -892,9 +1048,11 @@ def admin_delete_participant(name):
 
 @app.route("/api/admin/participants", methods=["POST"])
 def admin_add_participant_db():
-    d=request.json
+    d=request.json or {}
     if not secure_eq(_secret_candidates(), get_admin_secret()): return jsonify({"error":"Nicht autorisiert"}),403
-    name=(d.get("name") or "").strip()
+    name, err = _text_val(d, "name")
+    if err: return err
+    name=(name or "").strip()
     if not name: return jsonify({"error":"Name erforderlich"}),400
     with get_db() as con: con.execute("INSERT OR IGNORE INTO participant_db(name) VALUES(?)",(name,))
     return jsonify({"ok":True})
@@ -908,10 +1066,17 @@ def admin_delete_commodity_db(name):
 # ── UEX import (items sent from browser, processed server-side) ──────────────
 @app.route("/api/admin/uex_import", methods=["POST"])
 def uex_import():
-    d=request.json
+    d=request.json or {}
     if not secure_eq(_secret_candidates(), get_admin_secret()): return jsonify({"error":"Nicht autorisiert"}),403
     items=d.get("items",[])
     if not items: return jsonify({"error":"Keine Daten empfangen"}),400
+    if not isinstance(items, list): return jsonify({"error":"items muss eine Liste sein"}),400
+    for item in items:
+        if not isinstance(item, dict):
+            return jsonify({"error":"items muss eine Liste von Objekten sein"}),400
+        for k in ("name","type","grade","size"):
+            v, err = _text_val(item, k)
+            if err: return err
     # Browser already sends pre-mapped values: type="CIV"/"MIL" etc., grade="A"/"B" etc.
     valid_types={"MIL","STE","COM","CIV","IND"}
     valid_grades={"A","B","C","D"}
@@ -1116,6 +1281,29 @@ Diese Seite zeigt das Secret <strong>nicht</strong> an — es muss dem Betreiber
 
 @app.route("/")
 def index(): return send_from_directory(str(BASE),"index.html")
+
+# ── Härtung 3A: einheitliche JSON-Fehlerantworten für /api/* ─────────────────
+# Fuer Seiten-URLs bleibt Flask-Standard (HTML). 500 generisch ohne Traceback-Leak.
+@app.errorhandler(400)
+def _err_400(e):
+    if _api_path(): return jsonify({"error": "Ungültige Anfrage (JSON erwartet)"}), 400
+    return e
+@app.errorhandler(404)
+def _err_404(e):
+    if _api_path(): return jsonify({"error": "Nicht gefunden"}), 404
+    return e
+@app.errorhandler(405)
+def _err_405(e):
+    if _api_path(): return jsonify({"error": "Methode nicht erlaubt"}), 405
+    return e
+@app.errorhandler(415)
+def _err_415(e):
+    if _api_path(): return jsonify({"error": "Content-Type muss application/json sein"}), 415
+    return e
+@app.errorhandler(500)
+def _err_500(e):
+    if _api_path(): return jsonify({"error": "Interner Serverfehler"}), 500
+    return e
 
 if __name__=="__main__":
     port=int(sys.argv[1]) if len(sys.argv)>1 else 5000

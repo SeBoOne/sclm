@@ -10,16 +10,19 @@ Alle Anfragen/Antworten sind JSON (`Content-Type: application/json`), außer `/s
 
 ## 0. Grundregeln
 
-- **JSON-Pflicht bei bestimmten POST/PATCH-Handlern:** Diese Handler lesen strikt
-  `request.json`. Ohne `Content-Type: application/json` **und** Body (auch `{}` reicht)
-  antwortet Flask mit **415 Unsupported Media Type** als HTML-Seite — nicht als JSON-Fehler:
-  `…/regenerate_codes`, `…/participants/<pid>` (PATCH), `…/loot` (POST), `…/loot/<lid>/qty`,
-  `…/loot/<lid>/sale`, `…/commodities` (POST), `…/commodities/<cid>` (PATCH),
-  `…/commodities/<cid>/qty`, `…/raffle` (POST), `/api/admin/items`, `/api/admin/participants`,
-  `/api/admin/uex_import`, `/api/raidhelper/parse`.
-  Tolerant (`request.json or {}`): `…/create`, `…/settings`, `…/participants` (POST),
-  `…/wishes`, `…/raffle/<rid>` (PATCH), `/api/admin/change_secret`.
-  → Sende **immer** `Content-Type: application/json` + Body, dann ist die Unterscheidung egal.
+- **Input-Validierung (Härtung 3A, ab v5.0+):**
+  - **Textfelder** (`name`, `type`, `grade`, `size`, …): JSON-Zeichenkette oder `null`.
+    Zahlen/Booleans/Listen/Objekte → `400 {"error":"<feld> muss eine Zeichenkette sein"}`.
+  - **Numerische Felder** (`qty`, `scu`, `delta`, `sale_revenue`, `total_revenue`, `max_wishes`):
+    JSON-Zahl **oder** numerische Saite (`"3"` → 3). Booleans/nicht-numerische Saiten/Listen →
+    `400 {"error":"<feld> muss eine Zahl sein"}`. NaN/Infinity (auch als JSON-Literal) →
+    `400 {"error":"<feld> darf nicht NaN oder unendlich sein"}`.
+  - **Obergrenzen** (beim Speichern geprüft, Konstanten am Anfang von `server.py`):
+    `qty` 1–100000 · `delta` ±100000 · `scu` 0–1.000.000.000 · `sale_revenue`/`total_revenue`
+    0–1.000.000.000.000 → Verstoß `400 {"error":"<feld> muss zwischen <lo> und <hi> sein"}`.
+  - **JSON-Fehler unter `/api/*`:** 400/404/405/415/500 antworten jetzt JSON `{"error":"…"}`
+    (415 = fehlender `Content-Type: application/json`; 500 generisch, ohne Traceback).
+    Für Seiten-URLs bleibt HTML.
 - **Kein CORS**: Die API ist auf dieselbe Origin beschränkt (Browser-Clients von sclm.site).
   Server-zu-Server (Bots, Tools, Home Assistant, OpenDeck) ist problemlos möglich.
 - **Keine Webhooks / kein WebSocket**: Statusänderungen werden per Polling gelesen
@@ -31,6 +34,7 @@ Alle Anfragen/Antworten sind JSON (`Content-Type: application/json`), außer `/s
     Pfadparameter `<sid>` erwartet **immer die ID**.
   - `code` = 6-stelliger **Code** (`A-Z0-9`): `admin_code` oder `join_code`.
     Nur `GET /api/session/<code>` akzeptiert einen Code im Pfad.
+    Ein `sid` im GET-Pfad → `404 {"error":"sid im Pfad nicht erlaubt: GET /api/session/<admin_code oder join_code> verwenden"}`.
 - **ID-Längen**: Session-/Teilnehmer-/Loot-/Ergebnis-IDs sind 8 Zeichen (`a-z0-9`).
   Teilnehmer-Keys (`pcode`) sind URL-sichere Secrets (~22 Zeichen). Admin-Secret ist 32 Hex-Zeichen.
 
@@ -375,7 +379,11 @@ Der Pfad akzeptiert **`admin_code` oder `join_code`** (Groß-/Kleinschreibung eg
 - Mit `admin_code`: `is_admin: true`, `admin_code` und alle `pcode`-Werte werden mitgeliefert.
 - Mit `join_code`: `is_admin: false`, `admin_code` und `pcode` werden **entfernt**.
 - `404 {"error":"Code ungültig"}` bei falschem Code.
+- `404 {"error":"sid im Pfad nicht erlaubt: GET /api/session/<admin_code oder join_code> verwenden"}`
+  wenn im Pfad eine **existierende Session-ID** statt eines Codes steht.
 - Vollständige Daten inkl. `participants[].wishes` und `loot[].wish_count` — auch ohne Login-Status.
+  Additiv (Härtung 3A): `participants[].wish_count`, `participants[].no_interest_count` (1/0),
+  `results[].won_count`.
 
 ### PATCH /api/session/&lt;sid&gt;/settings
 Teilbar: nur die übergebenen Felder werden geändert.
@@ -455,8 +463,10 @@ Nur Admin. Entfernt Teilnehmer **und** dessen Wünsche/No-Interest-Einträge.
 - Nur-Join-Pfad: `pcode` Pflicht (`403 „Eigentumsnachweis fehlt"`), `max_wishes`-Grenze
   (`400 „Maximal N Wünsche erlaubt"`), Eigentümerschaftsprüfung (`403 „Nicht autorisiert für diesen Teilnehmer"`).
 - Ein herrenloser Datensatz wird beim ersten erfolgreichen Aufruf claimt.
-- Verkaufte Items (`for_sale:1`) sind für Wünsche nicht ausgeschlossen, haben aber keine
-  Wirkung auf die Ziehung.
+- Verkaufte Items (`for_sale:1`) können **nicht** gewünscht werden:
+  `400 {"error":"Gegenstand ist für Verkauf markiert","loot_ids":["<id>",…]}` (mode `wish`).
+  `mode: "no_interest"` ist davon unberührt. Das Markieren als Verkauf löscht bestehende
+  Wünsche weiterhin automatisch.
 
 Beispiel Admin setzt Wünsche für jemanden:
 ```bash
@@ -531,7 +541,7 @@ Entfernt Item **und** alle Wünsche/No-Interest dazu (Kaskade manuell implementi
 Rate-Limit: `POST …/raffle` = **20 Requests / 60 s pro IP** → `429`.
 
 ### POST /api/session/&lt;sid&gt;/raffle
-- **Body-Pflicht:** leerer Request ohne `Content-Type: application/json` → `415` (HTML).
+- **Body-Pflicht:** leerer Request ohne `Content-Type: application/json` → `415` (JSON unter `/api/*`).
   Richtig: `-H 'Content-Type: application/json' -d '{}'`.
 - `400 {"error":"Braucht Teilnehmer und Loot"}` wenn Teilnehmer **oder** nicht-verkauftes Loot fehlt.
 - Modus-Auswahl automatisch:
@@ -759,6 +769,7 @@ Diese Referenz wurde gegen eine lokal ausgeführte Instanz des v5.0-Codes verifi
 - Claim-Mechanismus (First-Come) für Admin-angelegte Teilnehmer, auch über `PATCH …/raffle/<rid>`
 - `400` bei `loot_ids` als String, `loot_ids: []` löscht Wünsche
 - `415` bei POST/PATCH ohne `Content-Type: application/json`, `400` bei JSON-CT ohne Body
+  (seit Härtung 3A als JSON-Antwort unter `/api/*`, siehe §0)
 - `settings`: `name:""` → `400`, `total_revenue:""` → Wert `null`, `image_url` ungültig → still `null`
 - `locked` per Session-Admin möglich, Entsperren nur mit `X-SCLM-Secret` (`403` sonst)
 - `for_sale:true` entfernt Wünsche/No-Interest dieses Items
