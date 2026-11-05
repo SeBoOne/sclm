@@ -15,12 +15,13 @@ DB = _data_dir / "data.db"
 # Nur static/ + index.html werden ausgeliefert — NIEMALS der App-Root.
 app = Flask(__name__, static_folder=str(BASE / "static"))
 
-# ── API-Härtung 3A: Zahlengrenzen (leicht anpassbar) ─────────────────────────
-QTY_MIN, QTY_MAX = 1, 100_000
+# ── API-Härtung 3A/3C: Zahlengrenzen (leicht anpassbar) ──────────────────────
+QTY_MIN, QTY_MAX = 1, 10_000   # 3C: von 100_000 gesenkt (Ziehung bläht je qty auf)
 DELTA_MIN, DELTA_MAX = -100_000, 100_000
 SCU_MIN, SCU_MAX = 0, 1_000_000_000
 REVENUE_MIN, REVENUE_MAX = 0, 1_000_000_000_000
 SAFE_ABS_MAX = 1e15            # Serialisierung: Beträge über 1e15 werden zu null
+RAFFLE_MAX_TOTAL = 50_000      # 3C: max. expandierte Loot-Instanzen pro Ziehung
 
 def get_db():
     con = sqlite3.connect(DB)
@@ -29,15 +30,31 @@ def get_db():
     con.execute("PRAGMA foreign_keys=ON")
     return con
 
+def _resolved_port():
+    """3C: eine Port-Quelle für Banner UND app.run.
+    argv[1] gewinnt, wenn es eine reine Zahl ist (python server.py 5100),
+    danach $PORT (PORT=5100 python server.py), Fallback 5000.
+    Unter gunicorn ist argv[1] z.B. 'server:app' -> wird ignoriert."""
+    if len(sys.argv) > 1:
+        try:
+            return int(sys.argv[1])
+        except ValueError:
+            pass
+    try:
+        return int(os.environ.get("PORT", "5000"))
+    except ValueError:
+        return 5000
+
 def print_startup_info():
     try:
-        port = os.environ.get("PORT", "5000")
+        port = _resolved_port()
         sec = get_admin_secret()
         banner = "="*60
         print(f"\n{banner}")
         print(f"  SCLM — Star Citizen Loot Manager")
         print(f"{banner}")
         print(f"  URL:          http://localhost:{port}")
+        print(f"  Netzwerk:     http://<deine-IP>:{port}")
         print(f"{banner}")
         print(f"  ADMIN SECRET: {_secret_display(sec)}")
         if os.environ.get("SHOW_SECRET_ON_START","0")=="1":
@@ -155,13 +172,18 @@ def secure_eq(a, b):
     except (TypeError, ValueError):
         return a == b
 
-# ── Credentials aus Header/Query/Body (M4) ──────────────────────────────────
+# ── Credentials aus Header/Query/Body (M4, 3C) ───────────────────────────────
 # Secrets und Codes werden bevorzugt aus den Headers X-SCLM-Secret / X-SCLM-Code
 # gelesen (Frontend schickt nur Header, damit nichts in Access-Logs/History/
-# Referer landet). Query und Body bleiben als Fallback für alte Links/Clients.
+# Referer landet). 3C (Befund aus 3B-Review): Query-Zeilen landen in jedem
+# Access-Log — das Secret-Fallback (Query/Body) gilt daher nur noch für
+# POST/PUT/PATCH; GET/HEAD/DELETE lesen das Secret ausschließlich aus dem Header.
+# Codes (?code=, Body "code") bleiben unverändert auch als Legacy-Fallback.
 def _secret_candidates():
     v = request.headers.get("X-SCLM-Secret")
     if v: return v
+    if request.method not in ("POST", "PUT", "PATCH"):
+        return ""  # 3C: GET/HEAD/DELETE header-only (kein ?secret= mehr im Access-Log)
     v = request.args.get("secret")
     if v: return v
     d = request.get_json(silent=True) or {}
@@ -269,24 +291,35 @@ def is_intlike(v):
 #    JSON-Zahl oder numerische Saite ("3" -> 3). Bool/Liste/nicht-numerische Saite
 #    -> 400 "<Feld> muss eine Zahl sein". NaN/Inf -> 400 "... darf nicht NaN oder
 #    unendlich sein".
+# 3C: Ganzzahl-Felder (integer=True: qty, loot-delta, max_wishes) lehnen
+#    nicht-ganzzahlige Zahlen ab -> 400 "<Feld> muss eine Ganzzahl sein".
+#    Ganzzahlige Fließkomma/Saiten (3.0, "3", "3.0") bleiben akzeptiert. Rein
+#    numerische Felder (scu, sale_revenue, total_revenue, commodities-delta)
+#    bleiben Dezimalzahlen.
 _INT_RE = re.compile(r"[+-]?\d+")
 
 def _num(v, key, integer=False):
-    """-> (value|None, err|None). Booleans werden als Zahl abgelehnt."""
+    """-> (value|None, err|None). Booleans werden als Zahl abgelehnt.
+    integer=True (3C): 1.5 -> Fehler 'muss eine Ganzzahl sein'; 3.0/'3'/'3.0' ok."""
     if v is None:
         return None, None
     if isinstance(v, bool):
         return None, f"{key} muss eine Zahl sein"
     if isinstance(v, str):
+        s = v.strip()
+        if integer and _INT_RE.fullmatch(s):
+            return int(s), None
+        try:
+            f = float(s)
+        except ValueError:
+            return None, f"{key} muss eine Zahl sein"
+        if not math.isfinite(f):
+            return None, f"{key} darf nicht NaN oder unendlich sein"
         if integer:
-            if not _INT_RE.fullmatch(v.strip()):
-                return None, f"{key} muss eine Zahl sein"
-            v = int(v.strip())
-        else:
-            try:
-                v = float(v)
-            except ValueError:
-                return None, f"{key} muss eine Zahl sein"
+            if not f.is_integer():
+                return None, f"{key} muss eine Ganzzahl sein"
+            return int(f), None
+        v = f
     if isinstance(v, (int, float)):
         try:
             out = int(v) if integer else float(v)
@@ -294,6 +327,8 @@ def _num(v, key, integer=False):
             return None, f"{key} darf nicht NaN oder unendlich sein"
         if not math.isfinite(out):
             return None, f"{key} darf nicht NaN oder unendlich sein"
+        if integer and isinstance(v, float) and not v.is_integer():
+            return None, f"{key} muss eine Ganzzahl sein"
         return out, None
     return None, f"{key} muss eine Zahl sein"
 
@@ -303,14 +338,18 @@ def _range_err(v, key, lo, hi, integer=False):
         return jsonify({"error": f"{key} muss zwischen {a} und {b} sein"}), 400
     return None
 
-def _text_val(payload, key):
-    """-> (value|None, err_json|None). Falscher Typ -> 400-Flask-Antworttuple."""
+def _text_val(payload, key, blank_to_none=False):
+    """-> (value|None, err_json|None). Falscher Typ -> 400-Flask-Antworttuple.
+    blank_to_none (3C): leere oder nur aus Leerzeichen bestehende Saiten -> None
+    (type/grade/size: der Vertrag kennt nur null oder Wert, kein drittes '')."""
     if key not in payload:
         return None, None
     v = payload[key]
     if v is None:
         return None, None
     if isinstance(v, str):
+        if blank_to_none and not v.strip():
+            return None, None
         return v, None
     return None, (jsonify({"error": f"{key} muss eine Zeichenkette sein"}), 400)
 
@@ -371,8 +410,9 @@ def load_session(sid_or_code, by_code=False):
             p["no_interest"] = [r["loot_id"] for r in con.execute(
                 "SELECT loot_id FROM no_interest WHERE participant_id=?",(p["id"],)).fetchall()]
             # Härtung 3A (additiv): Zählerfelder, bestehende Felder unverändert
+            # 3C: no_interest_count ist die Anzahl der no_interest-Einträge (nicht 1/0)
             p["wish_count"] = len(p["wishes"])
-            p["no_interest_count"] = 1 if p["no_interest"] else 0
+            p["no_interest_count"] = len(p["no_interest"])
         s["commodities"] = rows_to_list(con.execute(
             "SELECT * FROM commodities WHERE session_id=? ORDER BY name COLLATE NOCASE",(s["id"],)).fetchall())
         for c in s["commodities"]:
@@ -455,7 +495,8 @@ def list_sessions():
             "join_code":s["join_code"],
             "admin_code":s["admin_code"] if is_super else None,
             "locked":bool(s["locked"]),"raffle_done":bool(s["raffle_done"]),
-            "participant_count":pc,"loot_count":lc,
+            # 3C: loot_count/participant_count durch _safe_num (null bei vergifteten Altbeständen)
+            "participant_count":_safe_num(pc),"loot_count":_safe_num(lc),
             "commodity_scu":total_scu if comm else None,
             "commodity_revenue":total_rev if total_rev else None,
             "image_url":s.get("image_url"),
@@ -635,11 +676,11 @@ def add_loot(sid):
     qty, err = _num_val(data, "qty", integer=True, lo=QTY_MIN, hi=QTY_MAX, default=1)
     if err: return err
     if qty is None: qty = 1
-    typ, err = _text_val(data, "type")
+    typ, err = _text_val(data, "type", blank_to_none=True)
     if err: return err
-    grade, err = _text_val(data, "grade")
+    grade, err = _text_val(data, "grade", blank_to_none=True)
     if err: return err
-    size, err = _text_val(data, "size")
+    size, err = _text_val(data, "size", blank_to_none=True)
     if err: return err
     key=loot_key(name,typ,grade,size)
     with get_db() as con:
@@ -850,6 +891,18 @@ def run_raffle(sid):
     loot_items=[l for l in s["loot"] if not l.get("for_sale")]
     if not participants or not loot_items: return jsonify({"error":"Braucht Teilnehmer und Loot"}),400
 
+    # 3C: Ziehung vor Instanz-Explosion abschirmen — Gesamtzahl der zu
+    # expandierenden Instanzen VOR der Expansion prüfen (Altbestand-qty wird
+    # wie bei der Expansion auf QTY_MAX gekappt mitgezählt).
+    inst_total = 0
+    for l in loot_items:
+        q = _safe_num(l["qty"])
+        if q is None or q < 1: continue
+        inst_total += min(int(q), QTY_MAX)
+    if inst_total > RAFFLE_MAX_TOTAL:
+        return jsonify({"error": f"Zu viele Loot-Instanzen für eine Ziehung (max {RAFFLE_MAX_TOTAL})",
+                        "loot_instanzen": inst_total}), 400
+
     n_parts=len(participants)
     total_items=sum(_safe_num(l["qty"]) or 0 for l in loot_items)
     mode = "no_interest" if total_items < n_parts else "wish"
@@ -1029,11 +1082,11 @@ def admin_add_item():
     if err: return err
     name=(name or "").strip()
     if not name: return jsonify({"error":"Name erforderlich"}),400
-    typ, err = _text_val(d, "type")
+    typ, err = _text_val(d, "type", blank_to_none=True)
     if err: return err
-    grade, err = _text_val(d, "grade")
+    grade, err = _text_val(d, "grade", blank_to_none=True)
     if err: return err
-    size, err = _text_val(d, "size")
+    size, err = _text_val(d, "size", blank_to_none=True)
     if err: return err
     key=loot_key(name,typ,grade,size)
     with get_db() as con:
@@ -1306,17 +1359,6 @@ def _err_500(e):
     return e
 
 if __name__=="__main__":
-    port=int(sys.argv[1]) if len(sys.argv)>1 else 5000
-    sec=get_admin_secret()
-    banner="="*60
-    print(f"\n{banner}")
-    print(f"  SCLM — Star Citizen Loot Manager")
-    print(f"{banner}")
-    print(f"  URL:          http://localhost:{port}")
-    print(f"  Netzwerk:     http://<deine-IP>:{port}")
-    print(f"{banner}")
-    print(f"  ADMIN SECRET: {_secret_display(sec)}")
-    if os.environ.get("SHOW_SECRET_ON_START","0")=="1":
-        print(f"  Admin-URL:    http://localhost:{port}/#admin?secret={sec}")
-    print(f"{banner}\n")
-    app.run(host="0.0.0.0",port=port,debug=False)
+    # 3C: Banner wird bereits beim Import ausgegeben (print_startup_info, läuft auch
+    # unter gunicorn für docker logs). Kein zweiter Banner; Port wie im Banner.
+    app.run(host="0.0.0.0",port=_resolved_port(),debug=False)
