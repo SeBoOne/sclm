@@ -339,14 +339,14 @@ in der Query wird bei diesem Endpunkt ignoriert, die Einträge bleiben `null` (P
 PATCH behalten den Query-/Body-Fallback, §1). Alt-Clients, die das Secret trotzdem per
 GET-Query senden, gelten seit 3C als unauthentifiziert — und ein einmal gesendetes
 Secret bleibt trotzdem in den Access-Logs lesbar, Secret-Rotation ist danach weiterhin
-angezeigt. Ein Session-`admin_code` allein reicht **nicht**: er berechtigt nur diese eine
+notwendig. Ein Session-`admin_code` allein reicht **nicht**: er berechtigt nur diese eine
 Session und liefert in der Liste weiterhin `null`. Wer einen Join-Code braucht, bekommt
 ihn über `GET /api/session/<admin_code oder join_code>` (Session-Detail, §7). Die Liste
 selbst ist weiter öffentlich — Namen, Datum, Teilnehmerzahl, Lootzahl, Umsätze bleiben
 sichtbar. **Clients dürfen aus dieser Liste keinen Join-Code mehr ableiten** (UI zeigt
 dafür ein Code-Eingabefeld pro Event-Karte).
 Bei korrumpierten Altwerten (Altbestand) können `loot_count`, `commodity_scu` und
-`commodity_revenue` hier als `null` erscheinen (Serialisierung shield Ausreißer mit
+`commodity_revenue` hier als `null` erscheinen (Serialisierung shielded: Ausreißer mit
 `|wert| > 1e15` oder nicht endliche Werte; Text-Ausreißer in `loot.qty` ergeben in der
 Liste `loot_count` **`0`**, da SQL-`SUM` Text ignoriert, und negativer Altbestand erscheint
 als negative Zahl — der Shield hat keine Untergrenze).
