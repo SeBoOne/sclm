@@ -341,7 +341,9 @@ GET-Query senden, gelten seit 3C als unauthentifiziert — und ein einmal gesend
 Secret bleibt trotzdem in den Access-Logs lesbar, Secret-Rotation ist danach weiterhin
 notwendig. Ein Session-`admin_code` allein reicht **nicht**: er berechtigt nur diese eine
 Session und liefert in der Liste weiterhin `null`. Wer einen Join-Code braucht, bekommt
-ihn über `GET /api/session/<admin_code oder join_code>` (Session-Detail, §7). Die Liste
+ihn über `GET /api/session/<admin_code oder join_code>` (Session-Detail, §7). Für eine
+Lese-Ansicht **ohne** Code ist seit Runde 4A `GET /api/public/session/<id>` der vorgesehene
+Weg (siehe `GET /api/public/session/<sid>` in §7). Die Liste
 selbst ist weiter öffentlich — Namen, Datum, Teilnehmerzahl, Lootzahl, Umsätze bleiben
 sichtbar. **Clients dürfen aus dieser Liste keinen Join-Code mehr ableiten** (UI zeigt
 dafür ein Code-Eingabefeld pro Event-Karte).
@@ -397,6 +399,7 @@ Body: `{"json_data": { … }}` — der JSON-Export eines Raid-Helper-Events.
 |---|---|---|---|---|
 | POST | `/api/session/create` | keine | `{name, max_wishes?, image_url?}` | `{id, admin_code, join_code}` |
 | GET | `/api/session/<code>` | Code im Pfad | – | vollständiges Session-Objekt |
+| GET | `/api/public/session/<sid>` | keine | – | Session-Objekt **ohne Codes** (öffentliche Lese-Ansicht, Abschnitt unten) |
 | PATCH | `/api/session/<sid>/settings` | Admin/Site-Admin | beliebig (unten) | `{"ok":true}` |
 | POST | `/api/session/<sid>/regenerate_codes` | Session-Admin | – | `{admin_code, join_code}` |
 | DELETE | `/api/session/<sid>` | Admin/Site-Admin | – | `{"ok":true}` |
@@ -427,6 +430,44 @@ Der Pfad akzeptiert **`admin_code` oder `join_code`** (Groß-/Kleinschreibung eg
   `results[].won_count`.
   3C-Präzisierung: `no_interest_count` ist die **Anzahl** der `no_interest`-Einträge
   (`len(no_interest)`, also 0, 1, 2, 3 …) — kein Boolean-Ersatz (1/0) mehr.
+
+### GET /api/public/session/&lt;sid&gt; — öffentliche Lese-Ansicht (Runde 4A)
+
+Der **einzige** Endpunkt, der eine **Session-ID im Pfad** akzeptiert. Kein Code, kein
+`X-SCLM-Secret`, kein Header überhaupt nötig — `GET` genügt. `GET /api/session/<code>`
+bleibt davon unberührt und akzeptiert **weiter nur Codes** (sid im Pfad → `404`).
+
+**Gilt für alle Sessions**: offen, abgeschlossen (`raffle_done`) und gesperrt (`locked`).
+Eine Sperre blockiert nur **Schreibzugriff**, nie das Lesen.
+
+Ausgeliefert werden dieselben Daten wie beim Join-Code-Leser — **nur ohne Codes**:
+
+| Bereich | Felder |
+|---|---|
+| Session | `id`, `name`, `created`, `max_wishes`, `locked`, `raffle_locked`, `commodities_locked`, `raffle_done`, `raffle_mode`, `total_revenue`, `image_url`, `commodity_summary`, `is_admin` (immer `false`) |
+| `participants[]` | `id`, `name`, `added_by`, `wishes` (loot_ids), `no_interest` (loot_ids), `wish_count`, `no_interest_count` |
+| `loot[]` | `id`, `name`, `qty`, `type`, `grade`, `size`, `for_sale`, `sale_revenue`, `wish_count` |
+| `commodities[]` | `id`, `name`, `scu` |
+| `results[]` | `id`, `participant_id`, `participant_name`, `won` (Objekte, wie bei `won_json` zuvor), `won_count`, `won_by_wish`, `waived`, `collected` |
+
+**Ausdrücklich NICHT enthalten** (weder oben noch in `participants[]`, `loot[]`, `results[]`
+oder den `won`-Objekten): `join_code`, `admin_code`, `pcode`. Ein `pcode` wird im
+Admin-Zweig von `get_session` ergänzt — dieser Pfad wird hier nie betreten.
+
+Fehler: `404 {"error":"Session nicht gefunden"}` bei unbekannter oder nicht existenter
+`sid` (immer JSON, nie HTML). `POST/PUT/PATCH/DELETE` auf diesem Pfad gibt es nicht (`405`).
+
+Altbestand-Shielding wie beim Codes-Leser: `loot.qty`, `loot.sale_revenue`,
+`commodities.scu` und `total_revenue` werden mit `|wert| > 1e15` oder nicht endlichen
+Werten zu `null`; `commodity_summary.total_scu/total_revenue/sale_revenue` sind zusätzlich
+abgeschirmt. Die Antwort crasht bei vergifteten Altwerten nicht.
+
+**Empfehlung an Connector-/Manifest-Clients** (Overlay-Manifest, z. B. `sclm.json`; das
+Manifest liegt außerhalb dieses Repos — dort nichts ungefragt ändern): damit
+„Meine Verlosungen" wieder **ohne Codes** funktioniert, `scan.code_field` auf `"id"` und
+`scan.detail_endpoint` auf `/api/public/session/{code}` stellen — der `{code}`-Platzhalter
+wird dann mit der Session-ID gefüllt. `match_path` (`participants[].name`) funktioniert
+unverändert.
 
 ### PATCH /api/session/&lt;sid&gt;/settings
 Teilbar: nur die übergebenen Felder werden geändert.
@@ -703,6 +744,7 @@ Rate-Limits gesamt: `raffle` 20/60 s, `verify` 30/60 s, `change_secret` 10/60 s.
 | 400 | `Kennwort muss mindestens 8 Zeichen haben` | `change_secret` mit zu kurzem neue Secret |
 | 403 | `Nur lokal erreichbar` | `secret-hint` von extern |
 | 404 | `Nicht gefunden` | unbekannte Session-ID |
+| 404 | `Session nicht gefunden` | `GET /api/public/session/<sid>` mit unbekannter/fehlender sid (Abschnitt „öffentliche Lese-Ansicht“, §7) |
 | 404 | `Code ungültig` | `GET /api/session/<code>` mit falschem Code |
 | 404 | `Teilnehmer nicht in dieser Session` | participant_id gehört nicht zur Session |
 | 404 | `Deaktiviert` | `secret-hint` mit `DISABLE_SECRET_HINT=1` |
@@ -761,15 +803,25 @@ bestehende `pcode`-Werte bleiben an den Datensatz gebunden, nur der Session-Code
 
 ### 13.6 Lesemodus / Dashboard ohne Login
 ```
-GET /api/sessions           → Übersicht aller Events
-GET /api/session/{join_code}→ vollständige Einsicht inkl. Ergebnisse nach Ziehung
-GET /api/stats              → Globalzahlen
+GET /api/sessions                    → Übersicht aller Events (keine Codes)
+GET /api/public/session/{id}         → vollständige Einsicht OHNE Codes (Runde 4A)
+GET /api/session/{join_code}         → dieselbe Einsicht, aber nur mit Code
+GET /api/stats                       → Globalzahlen
 ```
 Reicht für Discord-Bots, overlays, Stream-Overlays. **Seit Härtung 3B liefert die Liste
-keine Join-Codes mehr** (`join_code: null` ohne `X-SCLM-Secret`) — ein Bot, der Events
-auflisten will, braucht den Join-Code vom Ersteller (oder das Site-Secret, wenn er der
-Site-Admin-Instanz des Betreibers ist). Der Lesemodus selbst bleibt offen: jeder, der einen
-Code kennt, liest die Session vollständig.
+keine Join-Codes mehr** (`join_code: null` ohne `X-SCLM-Secret`). **Seit Runde 4A ist dafür
+kein Code mehr nötig**: Listing → `id` → `GET /api/public/session/<id>` liefert Teilnehmer,
+Loot, Wunsch-/No-Interest-Listen und Ziehungsergebnisse vollständig — für **jede** Session
+(auch gesperrt und abgeschlossen). Wer **interagieren** will (Wünsche, Ergebnisse setzen,
+Loot, Teilnehmer), braucht weiterhin Codes; der Codes-Leser `GET /api/session/<join_code>`
+bleibt unverändert verfügbar.
+
+**Hinweis an Clients (Overlay-Konnektor, KI-Agenten):** die Sessions-Liste liefert
+weiterhin **keine** Codes und ist die einzige Quelle für `id`/`name`/Zähler. Öffentliche
+Details laufen über `/api/public/session/<sid>`; alles Schreibende braucht
+`X-SCLM-Code` (`admin_code`/`join_code` + ggf. `pcode`). **Eine sid darf nie in einen
+`/api/session/<...>`-Pfad oder in `X-SCLM-Code` geschrieben werden** — dieser Pfad akzeptiert
+nur Codes und lehnt sid mit `404` ab.
 
 ### 13.7 Teilnehmer-Key aushändigen (Gerätewechsel)
 ```
@@ -813,6 +865,11 @@ GET /api/session/{admin_code}   → participants[].pcode lesen
 12. **`join_code` kommt nicht mehr aus `GET /api/sessions`** (seit Härtung 3B `null` ohne gültiges `X-SCLM-Secret`). Ein Client, der Events auflistet und dann beitreten will, muss den Code vom Ersteller erhalten oder ihn vom Site-Admin bekommen. Die UI löst das über ein Code-Eingabefeld auf der Event-Karte.
 13. **Kein Multi-User-Lock:** gleichzeitige Wünsche desselben Teilnehmers aus zwei Clients können sich
     gegenseitig überschreiben (last-write-wins auf `DELETE`+`INSERT`). Ein Client pro Teilnehmer ist sicherer.
+14. **Zwei Lesewege, zwei Pfad-Verträge (Runde 4A):** `/api/public/session/<sid>` nimmt **nur** die
+    Session-ID und liefert **keine** Codes; `/api/session/<code>` nimmt **nur** Codes. Eine sid in
+    `X-SCLM-Code` oder in `/api/session/<sid>` ist ein Client-Fehler → `404` (`sid im Pfad nicht
+    erlaubt`), kein Server-Problem. Für eine reine Lese-Ansicht nie einen Code verwenden, für eine
+    Interaktion nie die sid.
 
 ---
 
@@ -823,7 +880,9 @@ Diese Referenz wurde gegen eine lokal ausgeführte Instanz des v5.0-Codes verifi
 lokalen Testinstanz, nicht der Produktivinstanz). Nach Härtung 3A und 3B nachgeprüft
 (2026-11-06, Stand `main` nach Merge von `fix/hardening-3b`, 44 Unit-Tests grün);
 Härtung 3C (Zweig `fix/hardening-3c`, in diesem Stand gemerged) ebenfalls live
-nachgeprüft (2026-11-06, 71 Unit-Tests grün):
+nachgeprüft (2026-11-06, 71 Unit-Tests grün). Runde 4A (öffentliche Lese-Ansicht, Zweig
+`feat/public-session-view`) gegen eine lokale Instanz nachgeprüft (2026-11-06, 92 Unit-Tests
+grün, 38 Live-Probe-Prüfungen, dazu UI-Rauchtest im Browser):
 
 - `GET /api/sessions`: `join_code` und `admin_code` sind `null` ohne Authentifizierung; mit
   gültigem `X-SCLM-Secret` kommen beide zurück — seit Härtung 3C bei diesem `GET` **nur per
@@ -835,9 +894,12 @@ nachgeprüft (2026-11-06, 71 Unit-Tests grün):
   `admin_code`. `admin_code`-Spalten in der `participants`-Tabelle liefert die API nie.
 - Teilnehmer-Registrierung über `POST /api/session/<sid>/participants` (`code` im Body) und
   `pcode`-Ablauf unverändert funktionsfähig.
-- UI: Event-Karte zeigt „🔑 Ansehen mit Code" mit Inline-Eingabefeld; falscher Code zeigt
-  „Code ungültig" inline, richtiger Code öffnet die Lesemaske; kein Code steht im HTML der
-  Startseite.
+- UI: Event-Karte zeigt „👁 Ansehen" (sid, öffentlicher Endpunkt, ohne jeden Code) **und**
+  „🔑 Ansehen mit Code" mit Inline-Eingabefeld; falscher Code zeigt „Code ungültig" inline,
+  richtiger Code öffnet die Lesemaske; kein Code steht im HTML der Startseite. Reload der
+  öffentlichen Ansicht lädt dieselbe Ansicht über `/api/public/session/<sid>` (im Access-Log
+  taucht dabei **kein** `/api/session/<sid>` auf). Site-Admin-Maske zeigt weiterhin
+  „👁 Ansehen" über `openRO(join_code)`.
 
 - `pcode` nur im Body (Header ignoriert), case-sensitive; `admin_code`/`join_code` case-insensitive
 - `409` bei DuplikatName (case-insensitive) inklusive vorhandener `id`
@@ -856,6 +918,28 @@ nachgeprüft (2026-11-06, 71 Unit-Tests grün):
 - `raffle_mode`-Umschaltung (wish ↔ no_interest) und Ziehungsmodus im Response
 - Kataloge: `item_db`/`commodity_db` füllen sich beim Anlegen, `participant_db` **nicht**
 - `result_for` → `{"result": null}` vor der Ziehung
+
+Runde 4A (öffentliche Lese-Ansicht, live geprüft):
+
+- `GET /api/public/session/<sid>`: `200` **ohne** Header, Code oder Secret; `is_admin:false`;
+  Teilnehmer, `wishes`/`no_interest`, `wish_count`/`no_interest_count`, Loot-Mengen,
+  `for_sale`/`sale_revenue`, Waren-`scu`, `commodity_summary` und nach der Ziehung `results[]`
+  mit `won`/`won_count` sind identisch zum Join-Code-Leser.
+- Kein `join_code`-, `admin_code`- oder `pcode`-Schlüssel im Payload (rekursiv über dict/list
+  geprüft, inkl. `won`-Objekten); keine Code-Werte im rohen JSON-Text; `won_json` wird nicht
+  ausgeliefert.
+- Unbekannte sid → `404 {"error":"Session nicht gefunden"}` als JSON (nie HTML);
+  `POST` auf dem Pfad → `405` als JSON.
+- `GET /api/session/<sid>` bleibt unverändert abgelehnt (`404 „sid im Pfad nicht erlaubt"`);
+  `GET /api/session/<join_code>` und `/<admin_code>` unverändert funktional.
+- Vergifteter Altbestand (`loot.qty=1e20`, `sale_revenue`/`scu`/`total_revenue=1e30` per
+  Test-DB gesetzt): `200` ohne Crash, Felder erscheinen als `null`, keine `1e20`/`Infinity`
+  im Payload; `commodity_summary` abgeschirmt.
+- Gesperrte (`locked`) und abgeschlossene (`raffle_done`) Sessions sind öffentlich lesbar;
+  Schreibversuche bleiben abgelehnt (ohne Codes `403 „Nicht autorisiert"`, mit Join-Code und
+  Sperre `403 „Session gesperrt"`).
+- `GET /api/sessions` liefert weiterhin keine Codes; `?secret=` bei GET ignoriert (3C),
+  `X-SCLM-Secret`-Header liefert Codes (Probe mit Dummy-Secret, kein Produktivwert).
 
 Nicht verändert durch diese Dokumentation: Verhaltensweisen, die nur aus dem Code ablesbar
 sind (z. B. Zufallsbasis der Ziehung, `ON DELETE CASCADE`, UEX-Merge-Logik).

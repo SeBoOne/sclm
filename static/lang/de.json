@@ -117,6 +117,8 @@
   "ro.loot.empty": "Kein Loot.",
   "ro.comm.empty": "Keine Waren.",
   "ro.res.empty": "Noch keine Verlosung.",
+  "ro.badge.readonly": "👁 Leseansicht",
+  "ro.badge.public": "👁 Öffentliche Leseansicht",
   "sa.tab.events": "Events",
   "sa.tab.items": "Gegenstände-DB",
   "sa.tab.participants": "Teilnehmer-DB",
