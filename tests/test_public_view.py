@@ -10,6 +10,7 @@ Schreibzugriff ohne Codes bleibt abgelehnt.
 import importlib
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -379,6 +380,64 @@ class TestContractGuard(ApiBase):
                          {k: v for k, v in b.items() if k != "commodity_summary"})
         self.assertNotIn("admin_code", b)
         self.assertNotIn("join_code", b)
+
+
+# ── 9. UI-Vertrag der Event-Karte (statische Wächter, kein Browser needed) ─────
+APP_JS = Path(__file__).resolve().parent.parent / "static" / "app.js"
+
+
+class TestEventCardUIContract(unittest.TestCase):
+    """Die Event-Karte hat seit 4A genau einen Lese-Knopf (sid, ohne Codes).
+
+    Statische Wächter auf static/app.js: verschwindet beim Umbau versehentlich die
+    const-Zeile eines Knopfs, kippt die Kartenrenderung mit ReferenceError bzw.
+    schreibt 'undefined' ins HTML — node --check sieht das nicht, die Syntax bleibt
+    korrekt, und keine API-Test rührt am UI.
+    """
+
+    FORBIDDEN = ("togJoinCodeBox", "openROWithCode", "ec-codebox", "jci-", "jcb-",
+                 "home.ec.view_with_code", "home.ec.code_placeholder", "home.ec.code_go")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = APP_JS.read_text(encoding="utf-8")
+        # Comments enthalten bewusst keine verbotenen Bezeichner, aber Kommentare
+        # dürfen einen Weg auch erwähnen — geprüft wird nur echter Code.
+        cls.code_only = "\n".join(ln.split("//")[0] for ln in cls.src.splitlines())
+        start = cls.src.index("el.innerHTML=list.map(s=>{")
+        cls.card = cls.src[start:cls.src.index('}).join("");', start)]
+
+    def test_single_public_view_button(self):
+        self.assertTrue('onclick="openPublic(' in self.card, "öffentlicher Ansehen-Knopf fehlt")
+        self.assertTrue("const viewBtn=" in self.card, "viewBtn-Deklaration fehlt")
+        self.assertTrue("${viewBtn}" in self.card, "viewBtn wird nicht gerendert")
+        self.assertTrue("getCreatorCode(" in self.card, "Ersteller-Schnellzugriff fehlt")
+
+    def test_code_entry_path_is_gone(self):
+        for gone in self.FORBIDDEN:
+            self.assertTrue(gone not in self.code_only, f"{gone} darf in app.js nicht mehr vorkommen")
+        for key in self.FORBIDDEN[5:]:
+            for lang in ("de", "en"):
+                d = json.loads((APP_JS.parent / "lang" / f"{lang}.json").read_text(encoding="utf-8"))
+                self.assertTrue(key not in d, f"{key} muss aus {lang}.json entfernt sein")
+
+    def test_card_identifiers_are_declared(self):
+        bare = set(re.findall(r"\$\{\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\}", self.card))
+        declared = set(re.findall(r"(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)", self.src))
+        declared |= set(re.findall(r"function\s+([A-Za-z_$][A-Za-z0-9_$]*)", self.src))
+        declared |= set(re.findall(r"list\.map\(([A-Za-z0-9_$]+)=>", self.src))
+        helpers = {"t", "esc", "urlEsc", "fmtN", "pillsHTML", "initials", "groupedChips"}
+        undeclared = sorted(bare - declared - helpers)
+        self.assertFalse(undeclared, f"Karte interpoliert undeklarierte Bezeichner: {undeclared}")
+
+    def test_i18n_keys_used_in_js_exist_in_both_languages(self):
+        keys = set(re.findall(r'(?<![\w$.])t\("([a-z0-9_.]+)"\)', self.src))
+        self.assertGreater(len(keys), 30, "Sanity: es werden i18n-Keys benutzt")
+        for lang in ("de", "en"):
+            d = json.loads((APP_JS.parent / "lang" / f"{lang}.json").read_text(encoding="utf-8"))
+            missing = sorted(k for k in keys if k not in d)
+            self.assertFalse(missing, f"{lang}.json fehlen Keys: {missing}")
+
 
 
 if __name__ == "__main__":

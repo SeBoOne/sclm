@@ -273,9 +273,6 @@ label{font-size:9px;color:var(--acc);font-family:ui-monospace,monospace;letter-s
 .ec-name{font-weight:600;font-size:14px;margin-bottom:4px}
 .ec-meta{font-family:ui-monospace,monospace;font-size:10px;color:var(--t2);display:flex;gap:12px;flex-wrap:wrap;letter-spacing:1px}
 .ec-actions{display:flex;gap:5px;margin-top:8px;flex-wrap:wrap}
-/* Härtung 3B: Inline-Join-Code-Abfrage auf der Event-Karte */
-.ec-codebox{display:flex;gap:5px;align-items:center;margin-top:8px}
-.ec-codebox input{padding:6px 9px;border-radius:var(--r);font-size:12px;max-width:150px}
 
 /* ---- Waiting / spinner ---- */
 .waiting{text-align:center;padding:50px 20px}

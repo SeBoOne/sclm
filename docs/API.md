@@ -895,12 +895,14 @@ grün, 38 Live-Probe-Prüfungen, dazu UI-Rauchtest im Browser):
   `admin_code`. `admin_code`-Spalten in der `participants`-Tabelle liefert die API nie.
 - Teilnehmer-Registrierung über `POST /api/session/<sid>/participants` (`code` im Body) und
   `pcode`-Ablauf unverändert funktionsfähig.
-- UI: Event-Karte zeigt „👁 Ansehen" (sid, öffentlicher Endpunkt, ohne jeden Code) **und**
-  „🔑 Ansehen mit Code" mit Inline-Eingabefeld; falscher Code zeigt „Code ungültig" inline,
-  richtiger Code öffnet die Lesemaske; kein Code steht im HTML der Startseite. Reload der
-  öffentlichen Ansicht lädt dieselbe Ansicht über `/api/public/session/<sid>` (im Access-Log
-  taucht dabei **kein** `/api/session/<sid>` auf). Site-Admin-Maske zeigt weiterhin
-  „👁 Ansehen" über `openRO(join_code)`.
+- UI: Event-Karte zeigt „👁 Ansehen" (sid, öffentlicher Endpunkt, ohne jeden Code). Der
+  Inline-Code-Weg der 3B-Zwischenlösung („🔑 Ansehen mit Code" mit Eingabefeld) ist
+  entfallen: er öffnete **dieselbe** Lesemaske (Payload bis auf `join_code`/`admin_code`/
+  `is_admin` identisch, die Maske zeigt diese Felder nicht), Teilnahme läuft über das
+  Code-Feld der Startseite (`loginCode` → Teilnehmermaske mit `pcode`-Ablauf). Kein Code
+  steht im HTML der Startseite. Reload der öffentlichen Ansicht lädt dieselbe Ansicht über
+  `/api/public/session/<sid>` (im Access-Log taucht dabei **kein** `/api/session/<sid>`
+  auf). Site-Admin-Maske zeigt weiterhin „👁 Ansehen" über `openRO(join_code)`.
 
 - `pcode` nur im Body (Header ignoriert), case-sensitive; `admin_code`/`join_code` case-insensitive
 - `409` bei DuplikatName (case-insensitive) inklusive vorhandener `id`
