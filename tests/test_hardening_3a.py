@@ -156,12 +156,13 @@ class TestNaNInf(ApiBase):
 # ── 2. Zahlengrenzen ──────────────────────────────────────────────────────────
 class TestBounds(ApiBase):
     def test_qty_bounds(self):
+        # 3C: QTY_MAX wurde von 100000 auf 10000 gesenkt
         s = self.new_session()
-        for bad in (0, -5, 100001, 10**9):
+        for bad in (0, -5, 10001, 10**9):
             r = self.add_loot(s, name="Q", qty=bad)
             self.assertEqual(r.status_code, 400, f"qty={bad}")
             self.assertIn("muss zwischen", self.error_json(r))
-        self.assertEqual(self.add_loot(s, name="Q", qty=100000).status_code, 200)
+        self.assertEqual(self.add_loot(s, name="Q", qty=10000).status_code, 200)
 
     def test_delta_bounds(self):
         s = self.new_session()

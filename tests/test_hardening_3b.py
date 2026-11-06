@@ -1,8 +1,9 @@
 """tests/test_hardening_3b.py — API-Härtungsrunde 3B (stdlib unittest + Flask test_client).
 
-Deckt ab: GET /api/sessions liefert join_code nur mit gültigem Site-Secret
-(Header und Query), öffentlich join_code:null bei erhaltenem Feld, übrige
-Listenfelder unverändert, Session-Detail per join_code weiterhin funktional.
+Deckt ab: GET /api/sessions liefert join_code nur mit gültigem Site-Secret per
+Header (Vertrag nach Härtung 3B + 3C: `?secret=` wird bei GET ignoriert),
+öffentlich join_code:null bei erhaltenem Feld, übrige Listenfelder unverändert,
+Session-Detail per join_code weiterhin funktional.
 """
 import importlib
 import os
@@ -87,9 +88,18 @@ class TestSecretList(ApiBase):
         self.assertEqual(e["join_code"], s["join_code"])
         self.assertEqual(e["admin_code"], s["admin_code"])
 
-    def test_join_code_with_query_secret(self):
+    def test_join_code_query_secret_ignored_header_secret_ok(self):
+        # Vertrag nach Härtung 3C: GET nimmt das Secret nur noch per Header.
+        # Der 3B-Wächter bleibt bestehen, auf der neuen Vertragsseite:
+        # Query-Secret -> Codes null; Header-Secret -> beide Codes gesetzt.
         s = self.new_session()
         r = self.c.get(f"/api/sessions?secret={self.secret}")
+        self.assertEqual(r.status_code, 200)
+        e = self.entry_for(r.get_json(), s["id"])
+        self.assertIn("join_code", e, "Feld join_code muss vorhanden bleiben")
+        self.assertIsNone(e["join_code"], "3C: ?secret= wird bei GET ignoriert")
+        self.assertIsNone(e["admin_code"], "3C: ?secret= wird bei GET ignoriert")
+        r = self.c.get("/api/sessions", headers={"X-SCLM-Secret": self.secret})
         self.assertEqual(r.status_code, 200)
         e = self.entry_for(r.get_json(), s["id"])
         self.assertEqual(e["join_code"], s["join_code"])

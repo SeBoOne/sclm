@@ -17,9 +17,22 @@ Alle Anfragen/Antworten sind JSON (`Content-Type: application/json`), außer `/s
     JSON-Zahl **oder** numerische Saite (`"3"` → 3). Booleans/nicht-numerische Saiten/Listen →
     `400 {"error":"<feld> muss eine Zahl sein"}`. NaN/Infinity (auch als JSON-Literal) →
     `400 {"error":"<feld> darf nicht NaN oder unendlich sein"}`.
+  - **Ganzzahl-Felder** (3C: `qty`, Loot-`delta`, `max_wishes`): nicht-ganzzahlige Zahlen
+    werden abgelehnt — `1.5` → `400 {"error":"<feld> muss eine Ganzzahl sein"}`.
+    Ganzzahlige Fließkommazahlen und Saiten (`3.0`, `"3"`, `"3.0"`) werden akzeptiert.
+    Rein numerische Felder (`scu`, `sale_revenue`, `total_revenue`, Waren-`delta`) bleiben
+    Dezimalzahlen.
   - **Obergrenzen** (beim Speichern geprüft, Konstanten am Anfang von `server.py`):
-    `qty` 1–100000 · `delta` ±100000 · `scu` 0–1.000.000.000 · `sale_revenue`/`total_revenue`
-    0–1.000.000.000.000 → Verstoß `400 {"error":"<feld> muss zwischen <lo> und <hi> sein"}`.
+    `qty` 1–10000 (3C: von 100000 gesenkt) · `delta` ±100000 · `scu` 0–1.000.000.000 ·
+    `sale_revenue`/`total_revenue` 0–1.000.000.000.000 → Verstoß `400 {"error":"<feld> muss
+    zwischen <lo> und <hi> sein"}`. Zusätzlich `RAFFLE_MAX_TOTAL` = 50000: Ziehungen werden
+    vor der Instanz-Expansion abgelehnt (§10).
+  - **Altbestand (korrumpierte Altwerte):** numerische Werte, die sich nicht sicher
+    serialisieren lassen (z. B. `qty` = 1e20 oder `Infinity` aus Daten vor der Härtung),
+    erscheinen als `null` statt als Zahl — bei `qty`, `scu`, `sale_revenue` in Detail-Payloads
+    und bei `loot_count`, `commodity_scu`, `commodity_revenue` in `GET /api/sessions`
+    (auch `loot_count`/`participant_count` der Liste sind geschützt; solche Werte zählen bei
+    Summen und Ziehungen wie nicht vorhanden).
   - **JSON-Fehler unter `/api/*`:** 400/404/405/415/500 antworten jetzt JSON `{"error":"…"}`
     (415 = fehlender `Content-Type: application/json`; 500 generisch, ohne Traceback).
     Für Seiten-URLs bleibt HTML.
@@ -54,8 +67,16 @@ Alle Anfragen/Antworten sind JSON (`Content-Type: application/json`), außer `/s
 Der Server liest Credentials in dieser Reihenfolge (Fallback-Kette):
 
 1. Header `X-SCLM-Code` / `X-SCLM-Secret` ← **empfohlen**
-2. Query-Parameter `?code=` / `?secret=` (Legacy)
-3. JSON-Feld `code` / `secret` im Body (Legacy)
+2. Query-Parameter `?code=` (Legacy; für `secret` gilt die 3C-Einschränkung unten)
+3. JSON-Feld `code` / `secret` im Body (Legacy; für `secret` gilt die 3C-Einschränkung unten)
+
+**3C — Secret-Fallback nur noch für Body-Methoden:** `?secret=` und das Body-Feld
+`secret` akzeptiert der Server nur noch bei `POST`/`PUT`/`PATCH`. Bei `GET`, `HEAD` und
+`DELETE` wird das `admin_secret` **ausschließlich** aus dem Header `X-SCLM-Secret` gelesen
+— Query-Zeilen landen in jedem Access-Log und das Secret soll dort nicht auftauchen.
+Betrifft alle Endpunkte, die `admin_secret` prüfen (`GET /api/sessions`,
+`GET /api/admin/data`, `DELETE /api/admin/...` u. a.). Codes (`X-SCLM-Code`, `?code=`,
+Body `code`) sind davon **nicht** betroffen und bleiben wie bisher überall gültig.
 
 `pcode` wird **ausschließlich im JSON-Body** gelesen (`"pcode": "…"`). Ein Header
 `X-SCLM-Pcode` wird **nicht** unterstützt (Test: Request nur mit Header →
@@ -175,8 +196,8 @@ Das entscheidet, welche Auswahl-Oberfläche Teilnehmer sehen.
 }
 ```
 
-**Typ-/Größen-Semantik (wichtig):** Der Server validiert `type`/`grade`/`size` nicht —
-er speichert, was gesendet wird. Die Web-UI nutzt diese Konvention:
+**Typ-/Größen-Semantik (wichtig):** Der Server validiert `type`/`grade`/`size` nicht auf
+Wertelisten — er speichert, was gesendet wird. Die Web-UI nutzt diese Konvention:
 
 | Kategorie in der UI | gesendete Felder |
 |---|---|
@@ -187,6 +208,11 @@ er speichert, was gesendet wird. Die Web-UI nutzt diese Konvention:
 `size` ist **immer ein String ohne „S"** (`"3"`, nicht `"S3"`). Fremde Werte (`"weapon"`,
 `"S3"`) werden gespeichert, erzeugen aber **andere `loot_key`s** → Duplikate desselben
 Items. Halte dich an die Konvention oben.
+
+**3C — keine leeren Saiten:** `type`, `grade` und `size` kennen nur `null` oder einen
+Wert — ein dritter Zustand `""` wird nicht gespeichert. Leere oder nur aus Leerzeichen
+bestehende Saiten (z. B. `type:""`, `grade:"   "`) normalisiert der Server beim Speichern
+(Loot POST, Admin-Item POST) zu `null`, als hätte man das Feld weggelassen.
 
 
 Dedupe läuft über `loot_key`: identische Kombination aus Name/Typ/Grade/Größe wird
@@ -306,15 +332,24 @@ Array, neueste zuerst. Pro Eintrag:
   "participant_count":9, "loot_count":14, "commodity_scu":1200.0,
   "commodity_revenue":180000.0, "image_url":"https://…" }
 ```
-**`join_code` und `admin_code` sind hier standardmäßig `null`.** Seit Härtung 3B (Stand
-`main`) wird die Feldstruktur nicht entfernt, aber **nur mit gültigem `X-SCLM-Secret`**
-(Site-Admin) mit Werten gefüllt — auch der `?secret=`-Query-Fallback funktioniert hier noch.
-Ein Session-`admin_code` allein reicht **nicht**: er berechtigt nur diese eine Session und
-liefert in der Liste weiterhin `null`. Wer einen Join-Code braucht, bekommt ihn über
-`GET /api/session/<admin_code oder join_code>` (Session-Detail, §7). Die Liste selbst
-ist weiter öffentlich — Namen, Datum, Teilnehmerzahl, Lootzahl, Umsätze bleiben sichtbar.
-**Clients dürfen aus dieser Liste keinen Join-Code mehr ableiten** (UI zeigt dafür ein
-Code-Eingabefeld pro Event-Karte).
+**`join_code` und `admin_code` sind hier standardmäßig `null`.** Seit Härtung 3B wird die
+Feldstruktur nicht entfernt, aber **nur mit gültigem `X-SCLM-Secret`** (Site-Admin) mit
+Werten gefüllt — seit Härtung 3C bei `GET` **ausschließlich per Header**; ein `?secret=`
+in der Query wird bei diesem Endpunkt ignoriert, die Einträge bleiben `null` (POST/PUT/
+PATCH behalten den Query-/Body-Fallback, §1). Alt-Clients, die das Secret trotzdem per
+GET-Query senden, gelten seit 3C als unauthentifiziert — und ein einmal gesendetes
+Secret bleibt trotzdem in den Access-Logs lesbar, Secret-Rotation ist danach weiterhin
+angezeigt. Ein Session-`admin_code` allein reicht **nicht**: er berechtigt nur diese eine
+Session und liefert in der Liste weiterhin `null`. Wer einen Join-Code braucht, bekommt
+ihn über `GET /api/session/<admin_code oder join_code>` (Session-Detail, §7). Die Liste
+selbst ist weiter öffentlich — Namen, Datum, Teilnehmerzahl, Lootzahl, Umsätze bleiben
+sichtbar. **Clients dürfen aus dieser Liste keinen Join-Code mehr ableiten** (UI zeigt
+dafür ein Code-Eingabefeld pro Event-Karte).
+Bei korrumpierten Altwerten (Altbestand) können `loot_count`, `commodity_scu` und
+`commodity_revenue` hier als `null` erscheinen (Serialisierung shield Ausreißer mit
+`|wert| > 1e15` oder nicht endliche Werte; Text-Ausreißer in `loot.qty` ergeben in der
+Liste `loot_count` **`0`**, da SQL-`SUM` Text ignoriert, und negativer Altbestand erscheint
+als negative Zahl — der Shield hat keine Untergrenze).
 
 ### `GET /api/items/search?q=aputarma`
 ```json
@@ -372,6 +407,7 @@ Body: `{"json_data": { … }}` — der JSON-Export eines Raid-Helper-Events.
 ```
 - `name` Pflicht, ≤200 Zeichen.
 - `max_wishes` optional, Default **3**, Bereich **1–10** (Ganzzahl), sonst `400`.
+  3C: `2.5` → `max_wishes muss eine Ganzzahl sein`; `4.0` und `"4"` sind ok.
 - `image_url` optional: nur `http(s)://`, ≤2048 Zeichen, keine `<>"'`/Kontrollzeichen —
   sonst still `null` (kein Fehler!).
 - Antwort enthält **beide Codes nur einmal** — danach nur noch über `GET /api/session/<admin_code>`.
@@ -387,8 +423,10 @@ Der Pfad akzeptiert **`admin_code` oder `join_code`** (Groß-/Kleinschreibung eg
 - `404 {"error":"sid im Pfad nicht erlaubt: GET /api/session/<admin_code oder join_code> verwenden"}`
   wenn im Pfad eine **existierende Session-ID** statt eines Codes steht.
 - Vollständige Daten inkl. `participants[].wishes` und `loot[].wish_count` — auch ohne Login-Status.
-  Additiv (Härtung 3A): `participants[].wish_count`, `participants[].no_interest_count` (1/0),
+  Additiv (Härtung 3A): `participants[].wish_count`, `participants[].no_interest_count`,
   `results[].won_count`.
+  3C-Präzisierung: `no_interest_count` ist die **Anzahl** der `no_interest`-Einträge
+  (`len(no_interest)`, also 0, 1, 2, 3 …) — kein Boolean-Ersatz (1/0) mehr.
 
 ### PATCH /api/session/&lt;sid&gt;/settings
 Teilbar: nur die übergebenen Felder werden geändert.
@@ -501,8 +539,11 @@ curl -s -X POST https://sclm.site/api/session/9k2m4x7q/wishes \
 { "name":"Quantum Core", "type":"MIL", "grade":"A", "size":"1" } // Komponente
 { "name":"Medkit" }                                              // einfaches Item
 ```
-- `name` ≤120, `qty` Default 1 (`400` bei nicht-Ganzzahl; danach `max(1, qty)`).
-- Feldkonvention siehe §3 (Typ-Semantik) — `type`/`grade`/`size` werden nicht validiert.
+- `name` ≤120, `qty` Default 1, Bereich **1–10000** (3C; `400` bei nicht-Ganzzahl wie `1.5`
+  → `qty muss eine Ganzzahl sein`; `3.0` und `"3"` ok).
+- Feldkonvention siehe §3 (Typ-Semantik) — `type`/`grade`/`size` werden nicht auf
+  Wertelisten validiert; leere Saiten werden zu `null` normalisiert (3C). `name: ""` bleibt
+  `400 {"error":"Name erforderlich"}`.
 - Dedupe über `loot_key` → existierendes Item: `qty` wird **erhöht**, Response enthält die
   vorhandene `id`. **Nicht** identisch: eigener Eintrag.
 - Antwort `{"id":"l1id2x3y","key":"apputarma blaster|||3"}`.
@@ -510,6 +551,8 @@ curl -s -X POST https://sclm.site/api/session/9k2m4x7q/wishes \
 
 ### PATCH …/loot/&lt;lid&gt;/qty
 `{"delta": -1}` → `qty = max(1, qty + delta)` (geht nie unter 1). Für Löschen DELETE nutzen.
+`delta` ist Ganzzahl-Feld (Bereich ±100000; 3C: `1.5` → `400 delta muss eine Ganzzahl sein`,
+`2.0` ok).
 
 ### PATCH …/loot/&lt;lid&gt;/sale
 ```json
@@ -549,6 +592,11 @@ Rate-Limit: `POST …/raffle` = **20 Requests / 60 s pro IP** → `429`.
 - **Body-Pflicht:** leerer Request ohne `Content-Type: application/json` → `415` (JSON unter `/api/*`).
   Richtig: `-H 'Content-Type: application/json' -d '{}'`.
 - `400 {"error":"Braucht Teilnehmer und Loot"}` wenn Teilnehmer **oder** nicht-verkauftes Loot fehlt.
+- **3C-Ausbaugrenze (vor der Expansion geprüft):** Summe der zu expandierenden Loot-Instanzen
+  (Mengen aller nicht-verkauften Items; Altbestand-`qty` wird dabei wie in der Ziehung auf
+  10000 gekappt mitgezählt) > `RAFFLE_MAX_TOTAL` = **50000** →
+  `400 {"error":"Zu viele Loot-Instanzen für eine Ziehung (max 50000)", "loot_instanzen": <Anzahl>}`.
+  Die Ziehung startet dann **nicht** (keine Ergebnisse, `raffle_done` unverändert).
 - Modus-Auswahl automatisch:
   - `total_items >= participant_count` → `"wish"`
   - `total_items <  participant_count` → `"no_interest"`
@@ -626,16 +674,17 @@ Rate-Limits gesamt: `raffle` 20/60 s, `verify` 30/60 s, `change_secret` 10/60 s.
 |---|---|---|
 | 400 | `Name erforderlich` | leerer/fehlender Name (Session, Teilnehmer) |
 | 400 | `Name zu lang` | >200 (Session) / >120 (Teilnehmer, Loot, Ware) |
-| 400 | `max_wishes muss eine Ganzzahl sein` / `muss zwischen 1 und 10 liegen` | Settings/Create |
+| 400 | `max_wishes muss eine Ganzzahl sein` / `muss zwischen 1 und 10 liegen` | Settings/Create (3C: auch bei `2.5`) |
 | 400 | `total_revenue muss eine Zahl sein` / `darf nicht negativ sein` | Settings |
 | 400 | `sale_revenue muss eine Zahl sein` / `darf nicht negativ sein` | Loot-Sale |
 | 400 | `scu muss eine Zahl sein` / `darf nicht negativ sein` | Waren |
 | 400 | `scu muss eine Zahl sein` / `scu darf nicht negativ sein` | Waren (POST/PATCH) |
 | 400 | `total_revenue muss eine Zahl sein` / `total_revenue darf nicht negativ sein` | Settings |
 | 400 | `sale_revenue muss eine Zahl sein` / `sale_revenue darf nicht negativ sein` | Loot-Verkauf |
-| 400 | `delta muss eine Ganzzahl sein` | Loot-Menge (Int) |
+| 400 | `delta muss eine Ganzzahl sein` | Loot-Menge (Int; 3C: auch bei `1.5`) |
 | 400 | `delta muss eine Zahl sein` | Waren-Menge (SCU, Float erlaubt) |
-| 400 | `qty muss eine Ganzzahl sein` | Loot |
+| 400 | `qty muss eine Ganzzahl sein` | Loot (3C: auch bei `1.5`; Grenze 1–10000) |
+| 400 | `Zu viele Loot-Instanzen für eine Ziehung (max 50000)` (+ Feld `loot_instanzen`) | POST …/raffle: >50000 zu expandierende Instanzen (§10, 3C) |
 | 400 | `Keine Daten empfangen` | `uex_import` mit leerer `items`-Liste |
 | 400 | `participant_id erforderlich` | Wünsche ohne ID |
 | 400 | `loot_ids muss eine Liste sein` | Array-Typ zwingend (JSON-String reicht nicht) |
@@ -772,10 +821,13 @@ GET /api/session/{admin_code}   → participants[].pcode lesen
 Diese Referenz wurde gegen eine lokal ausgeführte Instanz des v5.0-Codes verifiziert
 (2026-11-03, `server.py` Stand `main`; Codes und Session-IDS unten sind Wegwerfwerte einer
 lokalen Testinstanz, nicht der Produktivinstanz). Nach Härtung 3A und 3B nachgeprüft
-(2026-11-06, Stand `main` nach Merge von `fix/hardening-3b`, 44 Unit-Tests grün):
+(2026-11-06, Stand `main` nach Merge von `fix/hardening-3b`, 44 Unit-Tests grün);
+Härtung 3C (Zweig `fix/hardening-3c`, in diesem Stand gemerged) ebenfalls live
+nachgeprüft (2026-11-06, 71 Unit-Tests grün):
 
 - `GET /api/sessions`: `join_code` und `admin_code` sind `null` ohne Authentifizierung; mit
-  gültigem `X-SCLM-Secret` (Header **oder** `?secret=`) kommen beide zurück; mit halbem,
+  gültigem `X-SCLM-Secret` kommen beide zurück — seit Härtung 3C bei diesem `GET` **nur per
+  Header**, `?secret=` in der Query wird ignoriert (Einträge bleiben `null`); mit halbem,
   falschem oder leerem Secret bleibt alles `null`; ein Session-`admin_code` im
   `X-SCLM-Code`-Header füllt die Liste **nicht**.
 - Session-Detail unverändert: `GET /api/session/<join_code>` liefert den eigenen
