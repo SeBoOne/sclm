@@ -492,7 +492,9 @@ def list_sessions():
         total_rev = _safe_num((s["total_revenue"] or 0) + (sale or 0))
         result.append({
             "id":s["id"],"name":s["name"],"created":s["created"],
-            "join_code":s["join_code"],
+            # Härtung 3B: join_code nur für Site-Admin (gültiges Secret, gleicher
+            # Helper wie admin_data/admin_secret_hint). Öffentlich nur id/name/Metadaten.
+            "join_code":s["join_code"] if is_super else None,
             "admin_code":s["admin_code"] if is_super else None,
             "locked":bool(s["locked"]),"raffle_done":bool(s["raffle_done"]),
             # 3C: loot_count/participant_count durch _safe_num (null bei vergifteten Altbeständen)

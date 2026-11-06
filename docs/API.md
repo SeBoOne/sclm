@@ -59,7 +59,7 @@ Alle Anfragen/Antworten sind JSON (`Content-Type: application/json`), außer `/s
 |---|---|---|---|
 | **Site-Admin** | `admin_secret` (32 Hex) | global, alle Sessions, Katalog | Header `X-SCLM-Secret` |
 | **Session-Admin** | `admin_code` (6) | eine Session, volle Rechte | Header `X-SCLM-Code` |
-| **Teilnehmer** | `join_code` (6) | eine Session, nur eigene Daten | Header `X-SCLM-Code` |
+| **Teilnehmer** | `join_code` (6) | eine Session, nur eigene Daten | Header `X-SCLM-Code` (der Code kommt nicht mehr aus `GET /api/sessions`) |
 | **Eigentümerschaft** | `pcode` (~22 Zeichen) | ein Teilnehmer-Datensatz | **nur JSON-Body** `{"pcode": "…"}` |
 
 ### Übergabe: Header bevorzugt
@@ -328,17 +328,28 @@ anderen Gerät fortfahren können.
 Array, neueste zuerst. Pro Eintrag:
 ```json
 { "id":"9k2m4x7q", "name":"Jumptown Raid #4", "created":"03.11.2026",
-  "join_code":"ABC123", "admin_code": null, "locked":false, "raffle_done":false,
+  "join_code":null, "admin_code": null, "locked":false, "raffle_done":false,
   "participant_count":9, "loot_count":14, "commodity_scu":1200.0,
   "commodity_revenue":180000.0, "image_url":"https://…" }
 ```
-**Achtung:** `join_code` wird **unauthenticated ausgeliefert** — die Liste ist bewusst
-öffentlich, damit Teilnehmer Events in der Gruppenübersicht sehen. Auf öffentlich
-gehosteten Instanzen ist das ein bewusster Design-Nachteil: Jeder mit der URL kennt alle
-Join-Codes. `admin_code` ist `null` außer für Site-Admin-Anfragen (Secret **nur per
-Header** `X-SCLM-Secret`, 3C: `?secret=` wird bei diesem GET ignoriert).
+**`join_code` und `admin_code` sind hier standardmäßig `null`.** Seit Härtung 3B wird die
+Feldstruktur nicht entfernt, aber **nur mit gültigem `X-SCLM-Secret`** (Site-Admin) mit
+Werten gefüllt — seit Härtung 3C bei `GET` **ausschließlich per Header**; ein `?secret=`
+in der Query wird bei diesem Endpunkt ignoriert, die Einträge bleiben `null` (POST/PUT/
+PATCH behalten den Query-/Body-Fallback, §1). Alt-Clients, die das Secret trotzdem per
+GET-Query senden, gelten seit 3C als unauthentifiziert — und ein einmal gesendetes
+Secret bleibt trotzdem in den Access-Logs lesbar, Secret-Rotation ist danach weiterhin
+angezeigt. Ein Session-`admin_code` allein reicht **nicht**: er berechtigt nur diese eine
+Session und liefert in der Liste weiterhin `null`. Wer einen Join-Code braucht, bekommt
+ihn über `GET /api/session/<admin_code oder join_code>` (Session-Detail, §7). Die Liste
+selbst ist weiter öffentlich — Namen, Datum, Teilnehmerzahl, Lootzahl, Umsätze bleiben
+sichtbar. **Clients dürfen aus dieser Liste keinen Join-Code mehr ableiten** (UI zeigt
+dafür ein Code-Eingabefeld pro Event-Karte).
 Bei korrumpierten Altwerten (Altbestand) können `loot_count`, `commodity_scu` und
-`commodity_revenue` hier als `null` erscheinen (Serialisierung shield Ausreißer >1e15).
+`commodity_revenue` hier als `null` erscheinen (Serialisierung shield Ausreißer mit
+`|wert| > 1e15` oder nicht endliche Werte; Text-Ausreißer in `loot.qty` ergeben in der
+Liste `loot_count` **`0`**, da SQL-`SUM` Text ignoriert, und negativer Altbestand erscheint
+als negative Zahl — der Shield hat keine Untergrenze).
 
 ### `GET /api/items/search?q=aputarma`
 ```json
@@ -754,7 +765,11 @@ GET /api/sessions           → Übersicht aller Events
 GET /api/session/{join_code}→ vollständige Einsicht inkl. Ergebnisse nach Ziehung
 GET /api/stats              → Globalzahlen
 ```
-Reicht für Discord-Bots, overlays, Stream-Overlays. `join_code` ist ohnehin listbar.
+Reicht für Discord-Bots, overlays, Stream-Overlays. **Seit Härtung 3B liefert die Liste
+keine Join-Codes mehr** (`join_code: null` ohne `X-SCLM-Secret`) — ein Bot, der Events
+auflisten will, braucht den Join-Code vom Ersteller (oder das Site-Secret, wenn er der
+Site-Admin-Instanz des Betreibers ist). Der Lesemodus selbst bleibt offen: jeder, der einen
+Code kennt, liest die Session vollständig.
 
 ### 13.7 Teilnehmer-Key aushändigen (Gerätewechsel)
 ```
@@ -795,7 +810,7 @@ GET /api/session/{admin_code}   → participants[].pcode lesen
    Ein Client sollte `participants[].no_interest` vs `wishes` entsprechend der Sessions-`raffle_mode` pflegen.
 10. **Neustart der Ziehung überschreibt Ergebnisse** — `collected`/`waived`-Markierungen gehen dabei verloren.
 11. **`image_url` wird still ignoriert** wenn ungültig — nicht als Fehler behandeln, sondern URL validieren.
-12. **Öffentliche `join_code`-Liste** in `/api/sessions` auf öffentlich gehosteten Instanzen einplanen.
+12. **`join_code` kommt nicht mehr aus `GET /api/sessions`** (seit Härtung 3B `null` ohne gültiges `X-SCLM-Secret`). Ein Client, der Events auflistet und dann beitreten will, muss den Code vom Ersteller erhalten oder ihn vom Site-Admin bekommen. Die UI löst das über ein Code-Eingabefeld auf der Event-Karte.
 13. **Kein Multi-User-Lock:** gleichzeitige Wünsche desselben Teilnehmers aus zwei Clients können sich
     gegenseitig überschreiben (last-write-wins auf `DELETE`+`INSERT`). Ein Client pro Teilnehmer ist sicherer.
 
@@ -804,7 +819,25 @@ GET /api/session/{admin_code}   → participants[].pcode lesen
 ## 16. Verifikationsstand
 
 Diese Referenz wurde gegen eine lokal ausgeführte Instanz des v5.0-Codes verifiziert
-(2026-11-03, `server.py` Stand `main`). Geprüft und bestätigt:
+(2026-11-03, `server.py` Stand `main`; Codes und Session-IDS unten sind Wegwerfwerte einer
+lokalen Testinstanz, nicht der Produktivinstanz). Nach Härtung 3A und 3B nachgeprüft
+(2026-11-06, Stand `main` nach Merge von `fix/hardening-3b`, 44 Unit-Tests grün);
+Härtung 3C (Zweig `fix/hardening-3c`, in diesem Stand gemerged) ebenfalls live
+nachgeprüft (2026-11-06, 71 Unit-Tests grün):
+
+- `GET /api/sessions`: `join_code` und `admin_code` sind `null` ohne Authentifizierung; mit
+  gültigem `X-SCLM-Secret` kommen beide zurück — seit Härtung 3C bei diesem `GET` **nur per
+  Header**, `?secret=` in der Query wird ignoriert (Einträge bleiben `null`); mit halbem,
+  falschem oder leerem Secret bleibt alles `null`; ein Session-`admin_code` im
+  `X-SCLM-Code`-Header füllt die Liste **nicht**.
+- Session-Detail unverändert: `GET /api/session/<join_code>` liefert den eigenen
+  `join_code` (kein `admin_code`), `GET /api/session/<admin_code>` liefert `join_code` **und**
+  `admin_code`. `admin_code`-Spalten in der `participants`-Tabelle liefert die API nie.
+- Teilnehmer-Registrierung über `POST /api/session/<sid>/participants` (`code` im Body) und
+  `pcode`-Ablauf unverändert funktionsfähig.
+- UI: Event-Karte zeigt „🔑 Ansehen mit Code" mit Inline-Eingabefeld; falscher Code zeigt
+  „Code ungültig" inline, richtiger Code öffnet die Lesemaske; kein Code steht im HTML der
+  Startseite.
 
 - `pcode` nur im Body (Header ignoriert), case-sensitive; `admin_code`/`join_code` case-insensitive
 - `409` bei DuplikatName (case-insensitive) inklusive vorhandener `id`

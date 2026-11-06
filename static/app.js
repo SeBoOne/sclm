@@ -107,15 +107,43 @@ async function loadHome(){
     const imgStyle=s.image_url
       ? `background:linear-gradient(to right,var(--bg2) 50%,rgba(18,26,34,.85) 55%,rgba(18,26,34,.4) 100%),url('${urlEsc(s.image_url)}') right/54% no-repeat;`
       : '';
+    // Härtung 3B: join_code kommt nur noch mit Site-Secret. Ohne Secret (public)
+    // bietet die Karte ein Inline-Eingabefeld für den Join-Code statt des Direktaufrufs.
+    const codePublic=s.join_code!=null;
+    const viewBtn=codePublic
+      ? `<button class="btn btn-xs" onclick="openRO('${s.join_code}')">${t("home.ec.view")}</button>`
+      : `<button class="btn btn-xs" onclick="togJoinCodeBox('${s.id}')">${t("home.ec.view_with_code")}</button>`;
+    const codeBox=codePublic?"":`
+      <div class="ec-codebox H" id="jcb-${s.id}">
+        <input class="f1" id="jci-${s.id}" placeholder="${esc(t("home.ec.code_placeholder"))}" maxlength="6" style="text-transform:uppercase;letter-spacing:2px" oninput="this.value=this.value.toUpperCase()" onkeydown="if(event.key==='Enter')openROWithCode('${s.id}')"/>
+        <button class="btn btn-xs btn-acc" onclick="openROWithCode('${s.id}')">${t("home.ec.code_go")}</button>
+      </div>
+      <div class="alert a-err H" id="jce-${s.id}" style="margin:6px 0 0;padding:6px 10px"></div>`;
     return `<div class="ec" style="${imgStyle}">
       <div class="ec-name">${esc(s.name)} ${lk} ${dn}</div>
       <div class="ec-meta"><span>${s.created}</span><span>👥 ${s.participant_count}</span><span>📦 ${s.loot_count}</span><span>🏷 ${scu}</span><span>💰 ${rev}</span></div>
       <div class="ec-actions">
-        <button class="btn btn-xs" onclick="openRO('${s.join_code}')">${t("home.ec.view")}</button>
+        ${viewBtn}
         ${getCreatorCode(s.id)?`<button class="btn btn-xs btn-gold" onclick="quickAdminLogin('${s.id}')">${t("home.ec.creator")}</button>`:""}
-      </div>
+      </div>${codeBox}
     </div>`;
   }).join("");
+}
+
+// ── Härtung 3B: Join-Code-Abfrage inline auf der Event-Karte ─────────────────
+function togJoinCodeBox(sid){
+  const b=$(`jcb-${sid}`);if(!b)return;
+  b.classList.toggle("H");
+  if(!b.classList.contains("H")){const i=$(`jci-${sid}`);if(i)i.focus();}
+}
+async function openROWithCode(sid){
+  const inp=$(`jci-${sid}`);if(!inp)return;
+  const errEl=$(`jce-${sid}`);
+  const code=inp.value.trim().toUpperCase();
+  if(!code){if(errEl){errEl.textContent=t("home.ec.code_placeholder");show(`jce-${sid}`);}return;}
+  const r=await api(`/api/session/${code}`);
+  if(r.error){if(errEl){errEl.textContent=r.error;show(`jce-${sid}`);}return;}
+  S=r;myCode=code;showROView();
 }
 
 // M7: Admin-Codes NUR im sessionStorage (per Tab, kein Überleben über den
