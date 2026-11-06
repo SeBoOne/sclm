@@ -7,6 +7,9 @@ const hide=id=>$(id)&&$(id).classList.add("H");
 const tog=(id,v)=>v?show(id):hide(id);
 
 let S=null,myCode="",myPid="",myPName="",myPcode="";
+// Runde 4A: sid der öffentlichen Lese-Ansicht. myCode bleibt hier bewusst LEER —
+// ein Code-Feld mit sid würde spätere Requests als X-SCLM-Code absenden.
+let pubSid="";
 let selT="item",selG="A",selSz="1",selMw=3;
 let saSelT="item",saSelG="A",saSelSz="1";
 let acTmr=null,pollTmr=null;
@@ -107,12 +110,13 @@ async function loadHome(){
     const imgStyle=s.image_url
       ? `background:linear-gradient(to right,var(--bg2) 50%,rgba(18,26,34,.85) 55%,rgba(18,26,34,.4) 100%),url('${urlEsc(s.image_url)}') right/54% no-repeat;`
       : '';
-    // Härtung 3B: join_code kommt nur noch mit Site-Secret. Ohne Secret (public)
-    // bietet die Karte ein Inline-Eingabefeld für den Join-Code statt des Direktaufrufs.
+    // Härtung 3B: join_code kommt nur noch mit Site-Secret. Runde 4A: die
+    // öffentliche Ansicht läuft über die sid ("👁 Ansehen" → /api/public/session/<sid>),
+    // der Code-Weg ("🔑 Ansehen mit Code") bleibt für Teilnehmer erhalten —
+    // beide Knöpfe können auf derselben Karte stehen.
     const codePublic=s.join_code!=null;
-    const viewBtn=codePublic
-      ? `<button class="btn btn-xs" onclick="openRO('${s.join_code}')">${t("home.ec.view")}</button>`
-      : `<button class="btn btn-xs" onclick="togJoinCodeBox('${s.id}')">${t("home.ec.view_with_code")}</button>`;
+    const viewBtn=`<button class="btn btn-xs" onclick="openPublic('${s.id}')">${t("home.ec.view")}</button>`;
+    const codeBtn=codePublic?"":`<button class="btn btn-xs" onclick="togJoinCodeBox('${s.id}')">${t("home.ec.view_with_code")}</button>`;
     const codeBox=codePublic?"":`
       <div class="ec-codebox H" id="jcb-${s.id}">
         <input class="f1" id="jci-${s.id}" placeholder="${esc(t("home.ec.code_placeholder"))}" maxlength="6" style="text-transform:uppercase;letter-spacing:2px" oninput="this.value=this.value.toUpperCase()" onkeydown="if(event.key==='Enter')openROWithCode('${s.id}')"/>
@@ -123,7 +127,7 @@ async function loadHome(){
       <div class="ec-name">${esc(s.name)} ${lk} ${dn}</div>
       <div class="ec-meta"><span>${s.created}</span><span>👥 ${s.participant_count}</span><span>📦 ${s.loot_count}</span><span>🏷 ${scu}</span><span>💰 ${rev}</span></div>
       <div class="ec-actions">
-        ${viewBtn}
+        ${viewBtn}${codeBtn}
         ${getCreatorCode(s.id)?`<button class="btn btn-xs btn-gold" onclick="quickAdminLogin('${s.id}')">${t("home.ec.creator")}</button>`:""}
       </div>${codeBox}
     </div>`;
@@ -143,7 +147,7 @@ async function openROWithCode(sid){
   if(!code){if(errEl){errEl.textContent=t("home.ec.code_placeholder");show(`jce-${sid}`);}return;}
   const r=await api(`/api/session/${code}`);
   if(r.error){if(errEl){errEl.textContent=r.error;show(`jce-${sid}`);}return;}
-  S=r;myCode=code;showROView();
+  S=r;myCode=code;pubSid="";showROView();
 }
 
 // M7: Admin-Codes NUR im sessionStorage (per Tab, kein Überleben über den
@@ -195,10 +199,18 @@ async function quickAdminLogin(sid){
 async function openRO(jc){
   const r=await api(`/api/session/${jc}`);
   if(r.error){alert(r.error);return;}
-  S=r;myCode=jc;showROView();
+  S=r;myCode=jc;pubSid="";showROView();
+}
+// ── Runde 4A: öffentliche Lese-Ansicht (sid-basiert, ohne Codes) ─────────────
+// myCode bleibt hier LEER — die sid darf auf keinem Pfad in X-SCLM-Code landen.
+async function openPublic(sid){
+  myCode="";pubSid=sid;
+  const r=await api(`/api/public/session/${sid}`);
+  if(r.error){pubSid="";alert(r.error);return;}
+  S=r;showROView();
 }
 
-function goHome(){myCode="";myPid="";myPName="";S=null;clearNavState();document.body.style.backgroundImage="";loadHome();}
+function goHome(){myCode="";myPid="";myPName="";pubSid="";S=null;clearNavState();document.body.style.backgroundImage="";loadHome();}
 async function goAdmin(){
   const sec=prompt(t("adm.prompt.secret"));
   if(!sec) return;
@@ -212,9 +224,20 @@ function leaveSess(){stopPoll();clearInterval(adminPollTmr);clearNavState();goHo
 function showROView(){
   showPage("pg-ro");hide("spill");hide("btn-leave");
   applySessionBg();
-  saveNavState("ro",myCode,null,null);
+  // Runde 4A: die öffentliche Ansicht hat keinen Code — ihr Zustand heisst
+  // 'ro_public' + sid, damit ein Reload über /api/public/session/<sid> läuft
+  // und eine sid nie als Code in /api/session/<...> landet.
+  const pub=!myCode&&!!pubSid;
+  saveNavState(pub?"ro_public":"ro",myCode,null,null,pub?pubSid:null);
   $("ro-title").textContent=S.name.toUpperCase();
   $("ro-sub").textContent=`${S.created} // ${S.locked?t("ro.status.locked"):t("ro.status.active")}`;
+  const bd=$("ro-badge");
+  if(bd){
+    // data-i18n mitziehen, sonst überschreibt applyLang() den Badge mit dem
+    // Standard-Schlüssel (Badge wäre nach Sprachwechsel falsch).
+    bd.dataset.i18n=pub?"ro.badge.public":"ro.badge.readonly";
+    bd.textContent=t(pub?"ro.badge.public":"ro.badge.readonly");
+  }
   // stats
   const n=S.participants.length;
   const ti=totalItems(S);
@@ -312,6 +335,7 @@ function applySessionBg(){
 function showAdminView(){
   showPage("pg-admin");show("spill");show("btn-leave");
   applySessionBg();
+  pubSid="";
   saveNavState("admin",myCode,null,null);
   $("spill-name").textContent=S.name;
   $("adm-title").textContent=S.name.toUpperCase();
@@ -720,6 +744,7 @@ function loadPcode(pid){try{const v=JSON.parse(localStorage.getItem(SK())||"{}")
 function showPartView(){
   showPage("pg-part");show("spill");show("btn-leave");
   applySessionBg();
+  pubSid="";
   saveNavState("part",myCode,myPid,myPName);
   $("spill-name").textContent=S.name;$("pt-title").textContent=S.name.toUpperCase();
   hide("pt-wish");hide("pt-wait");hide("pt-result");show("pt-sel");renderPtList();
@@ -1151,8 +1176,12 @@ window.addEventListener("scroll",()=>["p-ac","l-ac","pt-nm-ac","co-ac"].forEach(
 
 // ── session persistence ──────────────────────────────────────────────────────
 const SSTATE_KEY="scr_session_state";
-function saveNavState(page,code,pid,name){
-  sessionStorage.setItem(SSTATE_KEY,JSON.stringify({page,code,pid,name}));
+// sid (Runde 4A) ist NUR für die öffentliche Ansicht ('ro_public') gedacht und
+// wird getrennt vom Code gehalten — niemals in einen /api/session/<code>-Pfad schreiben.
+function saveNavState(page,code,pid,name,sid){
+  const st={page,code,pid,name};
+  if(sid)st.sid=sid;
+  sessionStorage.setItem(SSTATE_KEY,JSON.stringify(st));
 }
 function clearNavState(){sessionStorage.removeItem(SSTATE_KEY);}
 
@@ -1364,6 +1393,16 @@ initLang().then(() => {
   if (saved) {
     try {
       const st = JSON.parse(saved);
+      // Runde 4A: öffentliche Ansicht. Der Reload geht ausschließlich über den
+      // sid-Endpunkt — eine sid darf niemals gegen /api/session/<code> laufen.
+      if (st.page === 'ro_public' && st.sid) {
+        (async () => {
+          const r = await api(`/api/public/session/${st.sid}`);
+          if (!r.error) { S = r; myCode = ""; pubSid = st.sid; showROView(); }
+          else loadHome();
+        })();
+        return;
+      }
       if (st.code) {
         (async () => {
           const r = await api(`/api/session/${st.code}`);

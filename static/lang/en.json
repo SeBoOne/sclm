@@ -117,6 +117,8 @@
   "ro.loot.empty": "No loot.",
   "ro.comm.empty": "No commodities.",
   "ro.res.empty": "No raffle yet.",
+  "ro.badge.readonly": "👁 Read only",
+  "ro.badge.public": "👁 Public view",
   "sa.tab.events": "Events",
   "sa.tab.items": "Items DB",
   "sa.tab.participants": "Participants DB",

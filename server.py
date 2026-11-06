@@ -541,6 +541,35 @@ def get_session(code):
                 if r: p["pcode"]=r[0]
     return jsonify(s)
 
+# ── Runde 4A: öffentliche Lese-Ansicht (sid-basiert, ohne Codes) ─────────────
+# Einziger Lese-Endpunkt, der eine Session-ID im Pfad akzeptiert (Schreib-Endpunkte
+# nehmen weiterhin sid + Code). Kein Secret, kein
+# Code, keine Authentifizierung — Lesezugriff auf ALLE Sessions (offen,
+# abgeschlossen, gesperrt; eine Sperre blockiert nur Schreibzugriff).
+# Codes (join_code/admin_code/pcode) werden hier ausdrücklich entfernt.
+@app.route("/api/public/session/<sid>")
+def public_session_view(sid):
+    s = load_session(sid, by_code=False)
+    if not s:
+        return jsonify({"error": "Session nicht gefunden"}), 404
+    # load_session selektiert die Participants ohne pcode-Spalte und liefert
+    # results ohne Code-Spalten; die Sessions-Zeile selbst enthält die Codes.
+    s.pop("join_code", None)
+    s.pop("admin_code", None)
+    s["is_admin"] = False
+    for p in s["participants"]:
+        p.pop("pcode", None)          # defensive: darf hier nie auftauchen
+    for r in s["results"]:
+        r.pop("won_json", None)       # defensive: won_json ist bereits in won überführt
+    # Summenfelder zusätzlich abgeschirmt (Altbestand darf kein 1e20/Infinity liefern)
+    cs = s.get("commodity_summary") or {}
+    cs["total_scu"] = _safe_num(cs.get("total_scu"))
+    cs["total_revenue"] = _safe_num(cs.get("total_revenue"))
+    cs["sale_revenue"] = _safe_num(cs.get("sale_revenue"))
+    cs["count"] = _safe_num(cs.get("count"))
+    s["commodity_summary"] = cs
+    return jsonify(s)
+
 @app.route("/api/session/<sid>/settings", methods=["PATCH"])
 def update_settings(sid):
     data=request.json or {}; code=_code_candidates()
