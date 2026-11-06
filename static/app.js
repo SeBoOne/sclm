@@ -231,7 +231,13 @@ function showROView(){
   saveNavState(pub?"ro_public":"ro",myCode,null,null,pub?pubSid:null);
   $("ro-title").textContent=S.name.toUpperCase();
   $("ro-sub").textContent=`${S.created} // ${S.locked?t("ro.status.locked"):t("ro.status.active")}`;
-  const bd=$("ro-badge");if(bd)bd.textContent=t(pub?"ro.badge.public":"ro.badge.readonly");
+  const bd=$("ro-badge");
+  if(bd){
+    // data-i18n mitziehen, sonst überschreibt applyLang() den Badge mit dem
+    // Standard-Schlüssel (Badge wäre nach Sprachwechsel falsch).
+    bd.dataset.i18n=pub?"ro.badge.public":"ro.badge.readonly";
+    bd.textContent=t(pub?"ro.badge.public":"ro.badge.readonly");
+  }
   // stats
   const n=S.participants.length;
   const ti=totalItems(S);
