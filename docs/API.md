@@ -433,8 +433,9 @@ Der Pfad akzeptiert **`admin_code` oder `join_code`** (Groß-/Kleinschreibung eg
 
 ### GET /api/public/session/&lt;sid&gt; — öffentliche Lese-Ansicht (Runde 4A)
 
-Der **einzige** Endpunkt, der eine **Session-ID im Pfad** akzeptiert. Kein Code, kein
-`X-SCLM-Secret`, kein Header überhaupt nötig — `GET` genügt. `GET /api/session/<code>`
+Der **einzige Lese-Endpunkt**, der eine **Session-ID im Pfad** akzeptiert (die
+Schreib-Endpunkte `/api/session/<sid>/…` nehmen weiterhin sid **plus** Code). Kein Code,
+kein `X-SCLM-Secret`, kein Header überhaupt nötig — `GET` genügt. `GET /api/session/<code>`
 bleibt davon unberührt und akzeptiert **weiter nur Codes** (sid im Pfad → `404`).
 
 **Gilt für alle Sessions**: offen, abgeschlossen (`raffle_done`) und gesperrt (`locked`).

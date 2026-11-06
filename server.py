@@ -542,7 +542,8 @@ def get_session(code):
     return jsonify(s)
 
 # ── Runde 4A: öffentliche Lese-Ansicht (sid-basiert, ohne Codes) ─────────────
-# Einziger Endpunkt, der eine Session-ID im Pfad akzeptiert. Kein Secret, kein
+# Einziger Lese-Endpunkt, der eine Session-ID im Pfad akzeptiert (Schreib-Endpunkte
+# nehmen weiterhin sid + Code). Kein Secret, kein
 # Code, keine Authentifizierung — Lesezugriff auf ALLE Sessions (offen,
 # abgeschlossen, gesperrt; eine Sperre blockiert nur Schreibzugriff).
 # Codes (join_code/admin_code/pcode) werden hier ausdrücklich entfernt.
